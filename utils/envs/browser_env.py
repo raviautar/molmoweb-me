@@ -18,6 +18,8 @@ import asyncio
 import base64
 import logging
 import os
+import subprocess
+import sys
 import time
 from abc import ABC, abstractmethod
 from io import BytesIO
@@ -378,3 +380,177 @@ class SimpleEnv(BrowserEnv):
 
     def _get_info(self) -> dict[str, Any]:
         return {}
+
+
+# ---- Custom: Reuse an existing Chrome profile (e.g. Gmail already logged in) ----
+class ProfiledChromeEnv(BrowserEnv):
+    """Browser environment that launches Chrome/Chromium against a user-specified
+    profile directory so that any existing login sessions (e.g. Gmail) are already
+    present without copying cookies.
+
+    Playwright uses `launch_persistent_context` which opens the real on-disk profile.
+    Note: The profile must NOT have another Chrome instance running against it at the
+    same time, or Chrome will refuse the lock.  Close the real browser first.
+
+    Args:
+        profile_dir: Absolute path to a Chrome user-data directory, e.g.
+                     ``/home/alice/.config/google-chrome`` or a custom path
+                     like ``~/.config/chromium``.  The directory is used as-is;
+                     Playwright will create it if it does not exist (fresh profile).
+        channel:     Optional Chrome channel to use: ``"chrome"``, ``"chrome-beta"``,
+                     ``"msedge"``, or ``None`` (plain Playwright Chromium build).
+        headless:    Whether to start the browser without a visible window.  For
+                     profile reuse, ``False`` is recommended during development so
+                     you can see what is happening.
+    """
+
+    STEALTH_ARGS = ["--disable-blink-features=AutomationControlled"]
+
+    def __init__(
+        self,
+        start_url: str = "about:blank",
+        goal: str = "",
+        viewport_width: int = 1280,
+        viewport_height: int = 720,
+        extract_axtree: bool = False,
+        profile_dir: str = "",
+        profile_name: str = "Default",
+        channel: str | None = None,
+        headless: bool = False,
+    ):
+        super().__init__(start_url, goal, viewport_width, viewport_height, extract_axtree)
+        # Step 1: Resolve and expand the profile directory path.
+        self.profile_dir = os.path.expanduser(profile_dir.strip()) if profile_dir.strip() else ""
+        # Step 2: Chrome sub-profile name inside the user-data directory (almost always "Default").
+        self.profile_name = profile_name.strip() or "Default"
+        self.channel = channel
+        # Step 3: Headless mode breaks authenticated sessions on most sites.
+        # Override silently to headed so login cookies are honoured.
+        if headless:
+            logger.warning(
+                "ProfiledChromeEnv: headless=True was requested but a Chrome profile is in use. "
+                "Overriding to headless=False so existing login sessions are not discarded."
+            )
+        self.headless = False
+        # Step 4: Holds a reference to a Xvfb subprocess started by _ensure_display().
+        self._xvfb_proc: subprocess.Popen | None = None
+
+    def _ensure_display(self) -> None:
+        """On Linux, auto-start a virtual X server (Xvfb) when no $DISPLAY is set.
+        This is required for headed Chrome launched inside a headless server environment.
+        Does nothing on Windows or when a real display is already available.
+        """
+        # Step 1: Nothing to do on Windows — no X display concept.
+        if sys.platform == "win32":
+            return
+
+        # Step 2: A display is already available; nothing to do.
+        if os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"):
+            return
+
+        # Step 3: Try to start Xvfb on a stable virtual display number.
+        display_num = 99
+        try:
+            self._xvfb_proc = subprocess.Popen(
+                ["Xvfb", f":{display_num}", "-screen", "0",
+                 f"{self.viewport_width}x{self.viewport_height}x24", "-ac"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            time.sleep(0.8)  # give Xvfb a moment to bind the display
+            os.environ["DISPLAY"] = f":{display_num}"
+            logger.info(f"ProfiledChromeEnv: auto-started Xvfb on :{display_num} (pid {self._xvfb_proc.pid})")
+        except FileNotFoundError:
+            raise RuntimeError(
+                "No X display found ($DISPLAY is not set) and Xvfb is not installed. "
+                "Install it on the server with:  sudo apt-get install -y xvfb"
+            ) from None
+
+    def _launch(self):
+        # Step 1: Validate that a profile directory was provided.
+        if not self.profile_dir:
+            raise ValueError(
+                "ProfiledChromeEnv requires a non-empty profile_dir. "
+                "Pass the path to your Chrome user-data directory, e.g. "
+                "'/home/youruser/.config/google-chrome'."
+            )
+
+        # Step 2: Detect a Windows-style path being used on a Linux server.
+        # The Playwright browser launches on the SERVER, not the user's local machine.
+        # A Windows path like C:\Users\... cannot be opened from a Linux process.
+        if sys.platform != "win32" and len(self.profile_dir) >= 3 and self.profile_dir[1] == ":":
+            raise ValueError(
+                f"Windows-style profile path detected: '{self.profile_dir}'\n"
+                "The Playwright browser runs on the SERVER (Linux), not your local Windows machine. "
+                "You have two options:\n"
+                "  A) Copy your Chrome 'User Data' folder to the Linux server and provide that Linux path.\n"
+                "  B) Leave 'Chrome Profile Dir' empty to use an isolated Chromium session instead."
+            )
+
+        # Step 3: Ensure a display is available; auto-start Xvfb when none is found.
+        self._ensure_display()
+
+        self.playwright = _start_playwright()
+
+        # Step 4: Build the persistent-context launch options.
+        # --profile-directory tells Chrome which sub-folder inside user-data-dir to open.
+        # Without it Chrome picks an arbitrary profile and ignores the logged-in cookies.
+        launch_opts: dict = {
+            "headless": self.headless,
+            "args": self.STEALTH_ARGS + [f"--profile-directory={self.profile_name}"],
+            "viewport": {"width": self.viewport_width, "height": self.viewport_height},
+        }
+        if self.channel:
+            launch_opts["channel"] = self.channel
+
+        # Step 5: Open (or create) the persistent profile.  This is the key call that
+        # makes Chrome reuse an existing on-disk login session.
+        self.context = self.playwright.chromium.launch_persistent_context(
+            self.profile_dir,
+            **launch_opts,
+        )
+
+        # Step 6: Reuse an existing page if the profile already has one open, otherwise
+        # create a fresh tab so the agent always has a page to work with.
+        if self.context.pages:
+            self.page = self.context.pages[0]
+        else:
+            self.page = self.context.new_page()
+
+        # Step 7: launch_persistent_context does not expose a browser object the same
+        # way launch() does.  Set self.browser to None so the base-class close()
+        # logic still runs safely.
+        self.browser = None
+
+    def _get_info(self) -> dict[str, Any]:
+        return {
+            "profile_dir": self.profile_dir,
+            "profile_name": self.profile_name,
+            "channel": self.channel or "",
+        }
+
+    def close(self):
+        # Step 1: Close the persistent context directly (no separate browser handle).
+        try:
+            if self.context is not None:
+                self.context.close()
+        except Exception:
+            pass
+        # Step 2: Stop Playwright runtime.
+        try:
+            if self.playwright is not None:
+                self.playwright.stop()
+        except Exception:
+            pass
+        self.playwright = None
+        self.browser = None
+        self.context = None
+        self.page = None
+        # Step 3: Terminate the Xvfb virtual display we started, if any.
+        if self._xvfb_proc is not None:
+            try:
+                self._xvfb_proc.terminate()
+                self._xvfb_proc.wait(timeout=3)
+            except Exception:
+                pass
+            self._xvfb_proc = None

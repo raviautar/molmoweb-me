@@ -720,6 +720,30 @@ summary {
   border-radius: 16px;
 }
 
+.field-hint {
+  margin: -8px 0 6px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  font-size: 11px;
+  line-height: 1.5;
+  border: 1px solid transparent;
+}
+.field-hint.hint-ok {
+  background: rgba(111, 227, 193, 0.1);
+  border-color: rgba(111, 227, 193, 0.22);
+  color: var(--accent-strong);
+}
+.field-hint.hint-warn {
+  background: rgba(255, 191, 105, 0.1);
+  border-color: rgba(255, 191, 105, 0.24);
+  color: #ffe0b6;
+}
+.field-hint.hint-idle {
+  background: rgba(143, 188, 255, 0.06);
+  border-color: rgba(143, 188, 255, 0.12);
+  color: var(--muted);
+}
+
 .error-banner {
   background: rgba(255, 122, 122, 0.14);
   border: 1px solid rgba(255, 122, 122, 0.26);

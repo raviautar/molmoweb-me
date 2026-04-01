@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from typing import Any
 
 
@@ -109,6 +110,9 @@ FRONTEND_CONFIG: dict[str, Any] = {
         "sessionEndpoint": "Model Endpoint",
         "sessionMaxSteps": "Max Steps",
         "sessionHeadless": "Headless",
+        "sessionChromeProfile": "Chrome Profile Dir",
+        "sessionChromeChannel": "Chrome Channel",
+        "sessionChromeProfileName": "Chrome Profile Name",
         "startFresh": "Start Fresh Chat",
         "startFreshShort": "Start Fresh",
         "currentSessions": "Current Sessions",
@@ -139,6 +143,9 @@ FRONTEND_CONFIG: dict[str, Any] = {
     "placeholders": {
         "endpoint": build_local_url(DEFAULT_SERVER_HOST, MODEL_SERVER_PORT),
         "prompt": "Go to the target site and extract the answer.",
+        "chromeProfile": "/home/youruser/.config/google-chrome",
+        "chromeChannel": "chrome  (leave blank for Playwright Chromium)",
+        "chromeProfileName": "Default  (or Profile 1, Profile 2 …)",
     },
     "emptyStates": {
         "sessions": "No sessions yet.",
@@ -229,4 +236,6 @@ def get_frontend_config(default_model_endpoint: str | None = None) -> dict[str, 
     frontend_config["defaults"]["endpoint"] = default_model_endpoint or get_default_model_endpoint()
     frontend_config["placeholders"] = dict(frontend_config["placeholders"])
     frontend_config["placeholders"]["endpoint"] = frontend_config["defaults"]["endpoint"]
+    # Step 3: Expose the server OS so the UI can warn when a Windows path is entered on a Linux server.
+    frontend_config["serverPlatform"] = sys.platform
     return frontend_config

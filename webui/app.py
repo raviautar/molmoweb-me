@@ -66,6 +66,16 @@ class CreateSessionRequest(BaseModel):
     local: bool = Field(default=True)
     headless: bool = Field(default=config.DEFAULT_HEADLESS)
     max_steps_default: int = Field(default=config.DEFAULT_MAX_STEPS, ge=config.MIN_MAX_STEPS, le=config.MAX_MAX_STEPS)
+    # Step 1: Optional Chrome profile path; when set, ProfiledChromeEnv is used so
+    # existing browser logins (e.g. Gmail) are inherited directly from the on-disk profile.
+    chrome_profile_dir: str = Field(default="")
+    # Step 2: Optional Chrome channel ("chrome", "chrome-beta", "msedge", or empty for
+    # Playwright's bundled Chromium build).
+    chrome_channel: str = Field(default="")
+    # Step 3: Sub-profile name inside the user-data directory.
+    # Chrome stores each user profile as a sub-folder ("Default", "Profile 1", etc.).
+    # This MUST match the actual folder name — leaving it blank defaults to "Default".
+    chrome_profile_name: str = Field(default="Default")
 
 
 class SendMessageRequest(BaseModel):
@@ -156,6 +166,9 @@ def create_session(request: CreateSessionRequest) -> dict:
         local=request.local,
         headless=request.headless,
         max_steps_default=request.max_steps_default,
+        chrome_profile_dir=request.chrome_profile_dir,
+        chrome_channel=request.chrome_channel,
+        chrome_profile_name=request.chrome_profile_name,
     )
 
 

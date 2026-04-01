@@ -74,6 +74,13 @@ const elements = {
   sessionEndpointLabel: document.getElementById("session-endpoint-label"),
   sessionHeadless: document.getElementById("session-headless"),
   sessionHeadlessLabel: document.getElementById("session-headless-label"),
+  sessionChromeProfile: document.getElementById("session-chrome-profile"),
+  sessionChromeProfileLabel: document.getElementById("session-chrome-profile-label"),
+  sessionChromeChannel: document.getElementById("session-chrome-channel"),
+  sessionChromeChannelLabel: document.getElementById("session-chrome-channel-label"),
+  sessionChromeProfileName: document.getElementById("session-chrome-profile-name"),
+  sessionChromeProfileNameLabel: document.getElementById("session-chrome-profile-name-label"),
+  profileHint: document.getElementById("profile-hint"),
   sessionInfoButton: document.getElementById("session-info-button"),
   sessionMaxSteps: document.getElementById("session-max-steps"),
   sessionMaxStepsLabel: document.getElementById("session-max-steps-label"),
@@ -357,6 +364,9 @@ function setBusy(isBusy, busyButtonKey = null, busyText = "Working") {
   elements.sessionEndpoint.disabled = isBusy;
   elements.sessionHeadless.disabled = isBusy;
   elements.sessionMaxSteps.disabled = isBusy;
+  elements.sessionChromeProfile.disabled = isBusy;
+  elements.sessionChromeChannel.disabled = isBusy;
+  elements.sessionChromeProfileName.disabled = isBusy;
 
   // Step 3: Show a small spinner only on the action button tied to the current operation.
   setButtonBusy(elements.sendPromptButton, isBusy && busyButtonKey === "send", busyText);
@@ -400,6 +410,9 @@ function applyFrontendConfig() {
   elements.sessionEndpointLabel.textContent = labels.sessionEndpoint;
   elements.sessionMaxStepsLabel.textContent = labels.sessionMaxSteps;
   elements.sessionHeadlessLabel.textContent = labels.sessionHeadless;
+  elements.sessionChromeProfileLabel.textContent = labels.sessionChromeProfile;
+  elements.sessionChromeChannelLabel.textContent = labels.sessionChromeChannel;
+  elements.sessionChromeProfileNameLabel.textContent = labels.sessionChromeProfileName;
   elements.newChatButton.textContent = labels.startFresh;
   elements.newChatButtonTopbar.textContent = labels.startFreshShort;
   elements.currentSessionsSummary.textContent = labels.currentSessions;
@@ -428,6 +441,13 @@ function applyFrontendConfig() {
   elements.serviceHealthHint.textContent = labels.serviceHealthHint;
   elements.sessionEndpoint.placeholder = placeholders.endpoint;
   elements.promptInput.placeholder = placeholders.prompt;
+  elements.sessionChromeProfile.placeholder = placeholders.chromeProfile;
+  elements.sessionChromeChannel.placeholder = placeholders.chromeChannel;
+  elements.sessionChromeProfileName.placeholder = placeholders.chromeProfileName;
+  // Step 3: Pre-fill the profile name with the correct default so it is visible to the user.
+  if (!elements.sessionChromeProfileName.value) {
+    elements.sessionChromeProfileName.value = "Default";
+  }
   elements.sessionMaxSteps.min = String(defaults.minSteps);
   elements.sessionMaxSteps.max = String(defaults.maxStepsLimit);
   elements.sessionMaxSteps.value = String(defaults.maxSteps);
@@ -471,6 +491,110 @@ function clearSelection() {
   renderWorkspace();
 }
 
+function updateProfileHint() {
+  const hint = elements.profileHint;
+  if (!hint) {
+    return;
+  }
+
+  const raw = elements.sessionChromeProfile.value.trim();
+
+  // Step 1: Hide the hint when the field is empty — no noise for default isolated sessions.
+  if (!raw) {
+    hint.textContent = "";
+    hint.className = "field-hint hint-idle hidden";
+    return;
+  }
+
+  // Step 2: Warn when a Windows-style path is entered but the server is running on Linux.
+  // The Playwright browser launches on the server, not the user's local machine.
+  const isWindowsPath = /^[A-Za-z]:[/\\]/.test(raw);
+  const serverIsLinux = state.appConfig && state.appConfig.serverPlatform !== "win32";
+  if (isWindowsPath && serverIsLinux) {
+    hint.textContent =
+      "⚠ Windows path detected, but the browser runs on the Linux server — not your local machine. " +
+      "You need a Linux path to a Chrome profile copied onto the server, or leave this field empty to use an isolated session.";
+    hint.className = "field-hint hint-warn";
+    hint.classList.remove("hidden");
+    return;
+  }
+
+  // Step 3: Check whether the value looks like a plausible absolute path.
+  const looksAbsolute = /^(\/|~\/|[A-Za-z]:[/\\])/.test(raw);
+  if (!looksAbsolute) {
+    hint.textContent = "⚠ Path should be absolute, e.g. /home/you/.config/google-chrome";
+    hint.className = "field-hint hint-warn";
+    hint.classList.remove("hidden");
+    return;
+  }
+
+  // Step 4: Warn about the most common mistake — pointing at the Default sub-folder instead of User Data.
+  const endsAtDefault = /[/\\]Default\s*$/.test(raw);
+  if (endsAtDefault) {
+    hint.textContent = "⚠ Use the parent 'User Data' directory, not the 'Default' sub-folder inside it.";
+    hint.className = "field-hint hint-warn";
+    hint.classList.remove("hidden");
+    return;
+  }
+
+  // Step 5: Path looks good — remind the user Chrome must be closed before starting.
+  hint.textContent = "✓ Profile path set. Make sure Chrome is fully closed before clicking Start Fresh.";
+  hint.className = "field-hint hint-ok";
+  hint.classList.remove("hidden");
+}
+
+async function startFreshSession(busyKey) {
+  // Step 1: Validate Chrome profile path before creating the session.
+  const profileDir = elements.sessionChromeProfile.value.trim();
+  if (profileDir) {
+    const isWindowsPath = /^[A-Za-z]:[/\\]/.test(profileDir);
+    const serverIsLinux = state.appConfig && state.appConfig.serverPlatform !== "win32";
+    const looksAbsolute = /^(\/|~\/|[A-Za-z]:[/\\])/.test(profileDir);
+    const endsAtDefault = /[/\\]Default\s*$/.test(profileDir);
+    if ((isWindowsPath && serverIsLinux) || !looksAbsolute || endsAtDefault) {
+      updateProfileHint();
+      elements.sessionChromeProfile.focus();
+      return;
+    }
+  }
+
+  // Step 2: Clear any existing selection so the workspace moves to a blank slate immediately.
+  clearSelection();
+
+  setBusy(true, busyKey, "Creating");
+  showError("");
+
+  try {
+    // Step 3: Eagerly create the session so the user sees a live context right away, without
+    // waiting to type a prompt first.
+    const session = await fetchJson(getRoutes().sessions, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(getSessionDefaults()),
+    });
+
+    // Step 4: Refresh the sidebar and select the brand-new session.
+    await loadAppStatus();
+    await loadSessions();
+    await selectSession(session.session_id);
+
+    // Step 5: Show a toast that describes which browser mode was started.
+    const profileSet = (session.chrome_profile_dir || "").trim();
+    const channel = (session.chrome_channel || "").trim();
+    const modeLabel = profileSet
+      ? `Chrome profile session${channel ? ` (${channel})` : ""} — inheriting existing logins`
+      : "Isolated Chromium session — no existing logins";
+    showToast(`Session created: ${modeLabel}`);
+
+    // Step 6: Close the sidebar so the workspace is the focus after creation.
+    setSidebarOpen(false);
+  } catch (err) {
+    showError(String(err));
+  } finally {
+    setBusy(false);
+  }
+}
+
 function applySamplePrompt() {
   // Step 1: Copy the built-in Hazlnut FAQ prompt into the composer for quick manual runs.
   elements.promptInput.value = state.appConfig.samples.hazlnutFaq.prompt;
@@ -485,6 +609,11 @@ function getSessionDefaults() {
     local: true,
     headless: elements.sessionHeadless.value === "true",
     max_steps_default: Number(elements.sessionMaxSteps.value || state.appConfig.defaults.maxSteps),
+    // Step 2: Pass the Chrome profile path and channel so ProfiledChromeEnv is used when set.
+    chrome_profile_dir: elements.sessionChromeProfile.value.trim(),
+    chrome_channel: elements.sessionChromeChannel.value.trim(),
+    // Step 3: Send the sub-profile name; defaults to "Default" on the server when blank.
+    chrome_profile_name: elements.sessionChromeProfileName.value.trim() || "Default",
   };
 }
 
@@ -555,6 +684,9 @@ function renderSessionInfo(session) {
     ["Endpoint", session.endpoint],
     ["Headless", String(session.headless)],
     ["Local Browser", String(session.local)],
+    ["Chrome Profile", session.chrome_profile_dir || ""],
+    ["Chrome Profile Name", session.chrome_profile_name || "Default"],
+    ["Chrome Channel", session.chrome_channel || ""],
     ["Max Steps Default", String(session.max_steps_default)],
     ["Run State", session.run_state || "idle"],
     ["Current Turn", String(session.current_turn_index || 0)],
@@ -1324,8 +1456,8 @@ async function initialize() {
   elements.sidebarToggleButton.addEventListener("click", () => setSidebarOpen(true));
   elements.sidebarCloseButton.addEventListener("click", () => setSidebarOpen(false));
   elements.sidebarBackdrop.addEventListener("click", () => setSidebarOpen(false));
-  elements.newChatButton.addEventListener("click", clearSelection);
-  elements.newChatButtonTopbar.addEventListener("click", clearSelection);
+  elements.newChatButton.addEventListener("click", () => startFreshSession("newChat"));
+  elements.newChatButtonTopbar.addEventListener("click", () => startFreshSession("newChatTopbar"));
   elements.useSamplePromptButton.addEventListener("click", applySamplePrompt);
   elements.runSamplePromptButton.addEventListener("click", runSamplePrompt);
   elements.sendPromptButton.addEventListener("click", sendPrompt);
@@ -1375,16 +1507,21 @@ async function initialize() {
     }
   });
 
-  // Step 2: Load all initial backend state required to render the application.
+  // Step 2: Attach live-validation listener on the Chrome Profile Dir field so feedback
+  // appears as the user types, before they click Start Fresh.
+  elements.sessionChromeProfile.addEventListener("input", updateProfileHint);
+  elements.sessionChromeProfile.addEventListener("blur", updateProfileHint);
+
+  // Step 3: Load all initial backend state required to render the application.
   await loadFrontendConfig();
   await loadAppStatus();
   await loadModelServiceData();
   await loadSessions();
 
-  // Step 3: Render the initial workspace using the loaded config and server data.
+  // Step 4: Render the initial workspace using the loaded config and server data.
   renderWorkspace();
 
-  // Step 4: Start background polling so running turns update live in the WebUI.
+  // Step 5: Start background polling so running turns update live in the WebUI.
   window.setInterval(() => {
     refreshActiveWorkspace();
   }, state.appConfig.defaults.refreshIntervalMs);

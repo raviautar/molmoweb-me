@@ -363,6 +363,9 @@ class SessionManager:
         headless: bool,
         max_steps_default: int,
         title_pending: bool,
+        chrome_profile_dir: str = "",
+        chrome_channel: str = "",
+        chrome_profile_name: str = "Default",
     ) -> dict[str, Any]:
         # Step 1: Build the initial persisted session metadata structure.
         created_at = _utc_now_iso()
@@ -380,6 +383,9 @@ class SessionManager:
             "local": local,
             "headless": headless,
             "max_steps_default": max_steps_default,
+            "chrome_profile_dir": chrome_profile_dir,
+            "chrome_channel": chrome_channel,
+            "chrome_profile_name": chrome_profile_name,
             "turn_count": 0,
             "current_turn_index": 0,
             "current_step_index": 0,
@@ -476,6 +482,9 @@ class SessionManager:
                 verbose=False,
                 session_id=runtime.session_id,
                 session_title=runtime.metadata.get("title", config.SESSION_UNTITLED_TITLE),
+                chrome_profile_dir=runtime.metadata.get("chrome_profile_dir", ""),
+                chrome_channel=runtime.metadata.get("chrome_channel", ""),
+                chrome_profile_name=runtime.metadata.get("chrome_profile_name", "Default"),
             )
         except Exception as exc:
             runtime.startup_error = str(exc)
@@ -578,6 +587,9 @@ class SessionManager:
         local: bool,
         headless: bool,
         max_steps_default: int,
+        chrome_profile_dir: str = "",
+        chrome_channel: str = "",
+        chrome_profile_name: str = "Default",
     ) -> dict[str, Any]:
         # Step 1: Generate a stable session identifier and resolve the session defaults.
         session_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
@@ -598,6 +610,9 @@ class SessionManager:
                     headless=headless,
                     max_steps_default=max_steps_default,
                     title_pending=title_pending,
+                    chrome_profile_dir=chrome_profile_dir.strip(),
+                    chrome_channel=chrome_channel.strip(),
+                    chrome_profile_name=chrome_profile_name.strip() or "Default",
                 ),
                 session_dir=session_dir,
             )

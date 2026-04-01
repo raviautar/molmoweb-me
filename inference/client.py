@@ -76,6 +76,9 @@ class MolmoWeb:
         verbose: bool = True,
         session_id: str | None = None,
         session_title: str | None = None,
+        chrome_profile_dir: str = "",
+        chrome_channel: str = "chrome",
+        chrome_profile_name: str = "Default",
     ):
         self.endpoint = endpoint or os.environ.get("MOLMOWEB_ENDPOINT")
         self.local = local
@@ -84,6 +87,11 @@ class MolmoWeb:
         self.verbose = verbose
         self.session_id = session_id
         self.session_title = session_title
+        # Step 1: Store Chrome profile settings so _create_env can pick them up.
+        self.chrome_profile_dir = chrome_profile_dir.strip() if chrome_profile_dir else ""
+        self.chrome_channel = chrome_channel.strip() if chrome_channel else ""
+        # Step 2: Sub-profile name inside the user-data directory (almost always "Default").
+        self.chrome_profile_name = chrome_profile_name.strip() or "Default"
         self.turn_index = 0
         self.agent = self._create_agent() if self.endpoint else None
         self.env = None
@@ -113,6 +121,27 @@ class MolmoWeb:
 
     def _create_env(self, start_url: str = config.BROWSER_START_URL):
         if self.local:
+            # Step 1: Use a profiled Chrome context when a profile directory is provided,
+            # so that any existing login sessions (e.g. Gmail in Chrome) are inherited.
+            if self.chrome_profile_dir:
+                from utils.envs import ProfiledChromeEnv
+
+                # Step 2: Headless mode discards session cookies on most sites.
+                # ProfiledChromeEnv enforces headless=False internally, but we log the
+                # override here at the client level so the operator sees it clearly.
+                return ProfiledChromeEnv(
+                    start_url=start_url,
+                    goal="",
+                    viewport_width=self.VIEWPORT_WIDTH,
+                    viewport_height=self.VIEWPORT_HEIGHT,
+                    extract_axtree=False,
+                    profile_dir=self.chrome_profile_dir,
+                    profile_name=self.chrome_profile_name,
+                    channel=self.chrome_channel or None,
+                    headless=self.headless,
+                )
+
+            # Step 3: Fall back to a plain isolated Chromium context when no profile is set.
             from utils.envs import SimpleEnv
 
             return SimpleEnv(
