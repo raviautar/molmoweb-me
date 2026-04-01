@@ -198,16 +198,25 @@ class MolmoWeb:
         max_steps: int,
         turn_index: int,
         step_callback: Callable[[int, Trajectory], None] | None = None,
+        stop_callback: Callable[[], bool] | None = None,
     ) -> Trajectory:
         traj = Trajectory()
         curr_obs = obs
         for step_num in range(1, max_steps + 1):
+            # Step 1: Stop before issuing the next action when the caller requested cancellation.
+            if stop_callback is not None and stop_callback():
+                return traj
+
             next_obs, step = self._run_one(curr_obs, query, step_num, max_steps, turn_index)
             traj.steps.append(step)
 
-            # Step 1: Publish step progress immediately so callers can persist live artifacts.
+            # Step 2: Publish step progress immediately so callers can persist live artifacts.
             if step_callback is not None:
                 step_callback(step_num, traj)
+
+            # Step 3: Stop after persisting the newest step when cancellation was requested mid-step.
+            if stop_callback is not None and stop_callback():
+                return traj
 
             if step.error is not None:
                 if self.verbose:
@@ -233,6 +242,7 @@ class MolmoWeb:
         max_steps: int,
         turn_index: int,
         step_callback: Callable[[int, Trajectory], None] | None = None,
+        stop_callback: Callable[[], bool] | None = None,
     ) -> Trajectory:
         with self._pw_context():
             self.last_obs = None
@@ -240,7 +250,14 @@ class MolmoWeb:
             self.agent.reset()
             obs, _ = self.env.reset()
             self._pw_event_loop = asyncio._get_running_loop()
-            return self._run_iters(obs, query, max_steps, turn_index, step_callback=step_callback)
+            return self._run_iters(
+                obs,
+                query,
+                max_steps,
+                turn_index,
+                step_callback=step_callback,
+                stop_callback=stop_callback,
+            )
 
     def continue_run(
         self,
@@ -248,26 +265,47 @@ class MolmoWeb:
         max_steps: int,
         turn_index: int,
         step_callback: Callable[[int, Trajectory], None] | None = None,
+        stop_callback: Callable[[], bool] | None = None,
     ) -> Trajectory:
         with self._pw_context():
             if self.last_obs is None:
                 raise ValueError("Cannot continue without a previous observation")
             self.agent.reset()
             obs = self.env._get_obs()
-            return self._run_iters(obs, query, max_steps, turn_index, step_callback=step_callback)
+            return self._run_iters(
+                obs,
+                query,
+                max_steps,
+                turn_index,
+                step_callback=step_callback,
+                stop_callback=stop_callback,
+            )
 
     def run(
         self,
         query: str,
         max_steps: int = 15,
         step_callback: Callable[[int, Trajectory], None] | None = None,
+        stop_callback: Callable[[], bool] | None = None,
     ) -> Trajectory:
         with self._pw_context():
             current_turn_index = self.turn_index + 1
             if self.env is None:
-                traj = self.fresh_run(query, max_steps, current_turn_index, step_callback=step_callback)
+                traj = self.fresh_run(
+                    query,
+                    max_steps,
+                    current_turn_index,
+                    step_callback=step_callback,
+                    stop_callback=stop_callback,
+                )
             else:
-                traj = self.continue_run(query, max_steps, current_turn_index, step_callback=step_callback)
+                traj = self.continue_run(
+                    query,
+                    max_steps,
+                    current_turn_index,
+                    step_callback=step_callback,
+                    stop_callback=stop_callback,
+                )
 
             self.turn_index = current_turn_index
 

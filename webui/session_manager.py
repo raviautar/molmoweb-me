@@ -19,7 +19,7 @@ from PIL import Image
 import config
 from agent.actions import SendMsgToUser
 from inference import MolmoWeb
-from inference.web_episode import Trajectory, save_trajectory_screenshots_png
+from inference.web_episode import Step, Trajectory, save_trajectory_screenshots_png
 
 
 def _utc_now_iso() -> str:
@@ -94,6 +94,7 @@ class SessionRuntime:
     worker_thread: threading.Thread | None = None
     ready_event: threading.Event = field(default_factory=threading.Event)
     startup_error: str = ""
+    close_requested: threading.Event = field(default_factory=threading.Event)
 
 
 class SessionManager:
@@ -229,22 +230,27 @@ class SessionManager:
                 if action.msg.startswith("[EXIT]"):
                     return action.msg.removeprefix("[EXIT]").strip() or action.msg, "stopped"
 
-        # Step 2: Surface explicit terminal errors before falling back to action strings.
+        # Step 2: Surface user-requested cancellation before generic terminal errors.
+        if trajectory.steps and trajectory.steps[-1].error == "Session closed by user":
+            return "Run stopped because the session was closed.", "stopped"
+
+        # Step 3: Surface explicit terminal errors before falling back to action strings.
         if trajectory.steps and trajectory.steps[-1].error:
             return str(trajectory.steps[-1].error), "error"
 
-        # Step 3: Report that the run exhausted the step budget when no final answer was produced.
+        # Step 4: Report that the run exhausted the step budget when no final answer was produced.
         if trajectory.steps and len(trajectory.steps) >= max_steps:
             return "Run reached the max step limit before producing a final answer.", "max_steps"
 
-        # Step 4: Fall back to the last user-visible message or the last structured action string.
+        # Step 5: Fall back to the last user-visible message or the last structured action string.
         if last_message:
             return last_message.removeprefix("[EXIT]").strip() or last_message, "message"
 
         if trajectory.steps and trajectory.steps[-1].prediction is not None:
             return trajectory.steps[-1].prediction.to_str(), "action"
 
-        return "", "empty"
+        # Step 6: Treat an empty trajectory as a stopped run when execution was interrupted before step 1 finished.
+        return "Run stopped because the session was closed.", "stopped"
 
     def _live_turn_summary(self, trajectory: Trajectory) -> str:
         # Step 1: Show a generic progress message while no steps have been recorded yet.
@@ -641,6 +647,7 @@ class SessionManager:
 
         # Step 2: Mark the session as actively running before browser execution begins.
         with runtime.lock:
+            runtime.close_requested.clear()
             turn_index = int(runtime.metadata.get("turn_count", 0)) + 1
             effective_max_steps = max_steps or int(runtime.metadata.get("max_steps_default", config.DEFAULT_MAX_STEPS))
             turn_started_at = _utc_now_iso()
@@ -692,6 +699,7 @@ class SessionManager:
                     turn_started_at=turn_started_at,
                     trajectory=live_trajectory,
                 ),
+                stop_callback=runtime.close_requested.is_set,
             )
         except Exception as exc:
             # Step 4: Persist the failure cleanly so the UI can surface it without a stack trace.
@@ -713,7 +721,19 @@ class SessionManager:
                 )
             raise RuntimeError(f"Browser session failed: {exc}") from exc
 
-        # Step 5: Build the persisted artifacts for the completed turn.
+        # Step 5: Append a terminal cancellation marker when the user closed the session mid-run.
+        if runtime.close_requested.is_set() and (
+            not trajectory.steps
+            or trajectory.steps[-1].error != "Session closed by user"
+            and not (
+                trajectory.steps[-1].prediction is not None
+                and isinstance(trajectory.steps[-1].prediction.action, SendMsgToUser)
+            )
+        ):
+            final_state = trajectory.steps[-1].state if trajectory.steps else None
+            trajectory.steps.append(Step(state=final_state, prediction=None, error="Session closed by user"))
+
+        # Step 6: Build the persisted artifacts for the completed turn.
         turn_dir = self._turns_dir(runtime) / f"turn_{turn_index:03d}"
         screenshots_dir = turn_dir / "screenshots"
         screenshots = save_trajectory_screenshots_png(trajectory, screenshots_dir, prefix="step")
@@ -726,14 +746,14 @@ class SessionManager:
         final_step = trajectory.steps[-1] if trajectory.steps else None
         turn_completed_at = _utc_now_iso()
 
-        # Step 6: Ask the model service to title the session after the first completed turn when needed.
+        # Step 7: Ask the model service to title the session after the first completed turn when needed.
         generated_title = runtime.metadata.get("title", config.SESSION_UNTITLED_TITLE)
         generated_title_source = runtime.metadata.get("title_source", "user")
         if turn_index == 1 and runtime.metadata.get("title_pending", False):
             generated_title, generated_title_source = self._generate_session_title(runtime, prompt, trajectory, turn_index)
             runtime.client.session_title = generated_title
 
-        # Step 7: Persist the structured turn artifacts for later analysis in the UI.
+        # Step 8: Persist the structured turn artifacts for later analysis in the UI.
         turn_record = {
             "turn_index": turn_index,
             "prompt": prompt,
@@ -754,7 +774,7 @@ class SessionManager:
         }
         _write_json_file(turn_dir / "turn.json", turn_record)
 
-        # Step 8: Append transcript and structured event records for the new turn.
+        # Step 9: Append transcript and structured event records for the new turn.
         transcript_path = runtime.session_dir / "chat_transcript.txt"
         events_path = runtime.session_dir / "events.jsonl"
         self._append_text_line(transcript_path, f"[{turn_started_at}] USER: {prompt}")
@@ -771,7 +791,7 @@ class SessionManager:
             },
         )
 
-        # Step 9: Update the live session summary so the UI reflects the completed turn immediately.
+        # Step 10: Update the live session summary so the UI reflects the completed turn immediately.
         with runtime.lock:
             runtime.metadata["title"] = generated_title
             runtime.metadata["title_pending"] = False
@@ -793,7 +813,14 @@ class SessionManager:
             runtime.metadata["live"] = True
             self._write_session_metadata(runtime)
 
-        # Step 10: Return the refreshed session detail payload to the caller.
+        # Step 11: Archive the session after the cancelled turn has been persisted.
+        if runtime.close_requested.is_set():
+            if runtime.client is not None:
+                runtime.client.close()
+                runtime.client = None
+            self._mark_runtime_inactive(runtime, run_state="closed", reason="Session closed by user")
+
+        # Step 12: Return the refreshed session detail payload to the caller.
         return self.get_session_detail(runtime.session_id)
 
     def run_turn(self, session_id: str, prompt: str, max_steps: int | None) -> dict[str, Any]:
@@ -813,16 +840,20 @@ class SessionManager:
         if runtime is None:
             raise KeyError(f"Unknown session_id: {session_id}")
 
-        # Step 2: Stop the live worker thread when one is still attached.
+        # Step 2: Signal cancellation immediately when the session is currently running a turn.
+        if runtime.metadata.get("run_state") == "running":
+            runtime.close_requested.set()
+
+        # Step 3: Stop the live worker thread when one is still attached.
         if runtime.worker_thread is not None:
             self._submit_task(runtime, "close", {})
             if runtime.worker_thread.is_alive():
                 runtime.worker_thread.join(timeout=5)
 
-        # Step 3: Persist the archived state for later UI analysis.
+        # Step 4: Persist the archived state for later UI analysis.
         self._mark_runtime_inactive(runtime, run_state="closed")
 
-        # Step 4: Return the updated session detail payload for UI refresh.
+        # Step 5: Return the updated session detail payload for UI refresh.
         return self.get_session_detail(session_id)
 
     def close_all_live_sessions(self) -> None:

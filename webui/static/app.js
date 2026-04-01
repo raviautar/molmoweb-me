@@ -7,6 +7,7 @@ const state = {
   isBusy: false,
   busyButtonKey: null,
   busyButtonText: "Working",
+  closeInFlight: false,
   modelServiceStatus: null,
   modelServiceLogs: null,
   galleryUrls: [],
@@ -36,6 +37,8 @@ const elements = {
   defaultEndpoint: document.getElementById("default-endpoint"),
   errorBanner: document.getElementById("error-banner"),
   errorBannerText: document.getElementById("error-banner-text"),
+  runningBanner: document.getElementById("running-banner"),
+  runningBannerText: document.getElementById("running-banner-text"),
   galleryCaption: document.getElementById("gallery-caption"),
   galleryClose: document.getElementById("gallery-close"),
   galleryImage: document.getElementById("gallery-image"),
@@ -61,6 +64,7 @@ const elements = {
   sendPromptButton: document.getElementById("send-prompt-button"),
   serviceHealthHint: document.getElementById("service-health-hint"),
   serviceHealthTitle: document.getElementById("service-health-title"),
+  stopRunButton: document.getElementById("stop-run-button"),
   samplePromptExpectedAnswer: document.getElementById("sample-prompt-expected-answer"),
   samplePromptExpectationLabel: document.getElementById("sample-prompt-expectation-label"),
   samplePromptTitle: document.getElementById("sample-prompt-title"),
@@ -226,6 +230,19 @@ function showError(message) {
   elements.errorBanner.classList.remove("hidden");
 }
 
+function showRunningBanner(session) {
+  // Step 1: Hide the stop banner when no selected live run is active.
+  if (!session || !session.live || session.run_state !== "running") {
+    elements.runningBanner.classList.add("hidden");
+    elements.runningBannerText.textContent = "";
+    return;
+  }
+
+  // Step 2: Explain that the active run can be interrupted immediately from the workspace.
+  elements.runningBannerText.textContent = "Run in progress. Use Stop Run to close the session and stop further reasoning.";
+  elements.runningBanner.classList.remove("hidden");
+}
+
 function showArchivedMessage(message) {
   // Step 1: Hide the archived banner when there is no archived-session message to show.
   if (!message) {
@@ -323,11 +340,14 @@ function setBusy(isBusy, busyButtonKey = null, busyText = "Working") {
 
   const selectedSessionIsLive = Boolean(state.selectedSessionId && state.sessionDetail && state.sessionDetail.live);
   const selectedSessionIsArchived = Boolean(state.selectedSessionId && state.sessionDetail && !state.sessionDetail.live);
+  const selectedSessionIsRunning = Boolean(selectedSessionIsLive && state.sessionDetail && state.sessionDetail.run_state === "running");
+  const closeIsBusy = state.closeInFlight || (isBusy && busyButtonKey === "close");
 
   // Step 2: Toggle the action buttons and inputs based on the current busy and session state.
   elements.sendPromptButton.disabled = isBusy || selectedSessionIsArchived;
-  elements.closeSessionButton.disabled = isBusy || !selectedSessionIsLive;
+  elements.closeSessionButton.disabled = closeIsBusy || !(selectedSessionIsLive || selectedSessionIsRunning);
   elements.refreshSessionButton.disabled = isBusy || !state.selectedSessionId;
+  elements.stopRunButton.disabled = closeIsBusy || !selectedSessionIsRunning;
   elements.newChatButton.disabled = isBusy;
   elements.newChatButtonTopbar.disabled = isBusy;
   elements.useSamplePromptButton.disabled = isBusy;
@@ -340,7 +360,7 @@ function setBusy(isBusy, busyButtonKey = null, busyText = "Working") {
 
   // Step 3: Show a small spinner only on the action button tied to the current operation.
   setButtonBusy(elements.sendPromptButton, isBusy && busyButtonKey === "send", busyText);
-  setButtonBusy(elements.closeSessionButton, isBusy && busyButtonKey === "close", busyText);
+  setButtonBusy(elements.closeSessionButton, closeIsBusy, state.closeInFlight ? "Closing" : busyText);
   setButtonBusy(elements.refreshSessionButton, isBusy && busyButtonKey === "refresh", busyText);
   setButtonBusy(elements.newChatButton, isBusy && busyButtonKey === "newChat", busyText);
   setButtonBusy(elements.newChatButtonTopbar, isBusy && busyButtonKey === "newChatTopbar", busyText);
@@ -968,6 +988,7 @@ function renderWorkspace() {
   elements.workspaceTitle.textContent = session ? session.title : state.appConfig.branding.workspaceDefaultTitle;
   elements.sessionSummary.textContent = session ? summarizeSession(session) : state.appConfig.branding.workspaceDefaultSummary;
   showArchivedMessage(getArchivedMessage(session));
+  showRunningBanner(session);
   renderChat(session);
   renderInspector(session);
   renderModelService();
@@ -1126,8 +1147,11 @@ async function sendPrompt() {
     }
   } catch (error) {
     // Step 4: Surface a readable failure and refresh whichever state can still be loaded.
-    showError(error.message || "The browser session failed.");
-    showToast(getAlerts().runFailure);
+    const errorMessage = error.message || "The browser session failed.";
+    if (errorMessage !== "This session is archived and cannot continue running browser actions") {
+      showError(errorMessage);
+      showToast(getAlerts().runFailure);
+    }
     await loadAppStatus();
     await loadModelServiceData();
     if (state.selectedSessionId) {
@@ -1142,12 +1166,13 @@ async function sendPrompt() {
 
 async function closeSelectedSession() {
   // Step 1: Stop early when no session is selected.
-  if (!state.selectedSessionId) {
+  if (!state.selectedSessionId || state.closeInFlight) {
     return;
   }
 
   showError("");
-  setBusy(true, "close", "Closing");
+  state.closeInFlight = true;
+  setBusy(state.isBusy, state.busyButtonKey, state.busyButtonText);
   try {
     // Step 2: Ask the backend to close the live browser session while preserving artifacts.
     state.sessionDetail = await fetchJson(`${getRoutes().sessions}/${state.selectedSessionId}/close`, {
@@ -1161,7 +1186,8 @@ async function closeSelectedSession() {
   } catch (error) {
     showError(error.message || "Could not close the session.");
   } finally {
-    setBusy(false);
+    state.closeInFlight = false;
+    setBusy(state.isBusy, state.busyButtonKey, state.busyButtonText);
   }
 }
 
@@ -1304,6 +1330,7 @@ async function initialize() {
   elements.runSamplePromptButton.addEventListener("click", runSamplePrompt);
   elements.sendPromptButton.addEventListener("click", sendPrompt);
   elements.closeSessionButton.addEventListener("click", closeSelectedSession);
+  elements.stopRunButton.addEventListener("click", closeSelectedSession);
   elements.refreshSessionButton.addEventListener("click", refreshSelectedSession);
   elements.galleryClose.addEventListener("click", closeGallery);
   elements.galleryPrev.addEventListener("click", () => moveGallery(-1));
