@@ -22,6 +22,9 @@
   - [Download the Model](#1-download-the-model)
   - [Start the Model Server](#2-start-the-model-server)
   - [Test the Model](#3-test-the-model)
+- [Service Endpoints](#service-endpoints)
+- [WebUI Sessions](#webui-sessions)
+- [Workflow Diagram](#workflow-diagram)
 - [Inference Client](#inference-client)
   - [Single Query](#single-query)
   - [Batch Queries](#batch-queries)
@@ -53,18 +56,48 @@ The first two models (MolmoWeb-8B and MolmoWeb-4B) are Huggingface/transformers-
 Requires Python 3.10+. We use [uv](https://docs.astral.sh/uv/) for dependency management.
 
 ```bash
-# Install uv if you don't have it
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# Clone and install
+# Clone and install inside a conda environment named molmoweb
 git clone git@github.com:allenai/molmoweb.git
 cd molmoweb
-uv venv
+
+# Create and activate the environment
+conda create -n molmoweb python=3.10 -y
+conda activate molmoweb
+
+# Install uv inside the conda environment
+conda install -c conda-forge uv -y
+
+# Tell uv to use the active conda environment instead of creating its own venv
+export UV_PROJECT_ENVIRONMENT="$CONDA_PREFIX"
+export UV_CACHE_DIR="$CONDA_PREFIX/.uv-cache"
+export PLAYWRIGHT_BROWSERS_PATH="$CONDA_PREFIX/.playwright"
 uv sync
 
 # Install Playwright browsers (needed for local browser control)
 uv run playwright install
+
+# Install extra system packages needed by Chromium on Linux.
+# This step installs OS-level packages, not conda packages, so it may prompt for sudo.
 uv run playwright install --with-deps chromium
+```
+
+On Ubuntu 24.04, `uv run playwright install --with-deps chromium` may fail because
+Playwright still requests `libasound2`, while Ubuntu now provides `libasound2t64`.
+If that happens, install it manually and then retry:
+
+```bash
+sudo apt-get install -y libasound2t64
+uv run playwright install --with-deps chromium
+```
+
+If you want this behavior every time you activate the environment, you can persist it with:
+
+```bash
+conda env config vars set UV_PROJECT_ENVIRONMENT="$CONDA_PREFIX"
+conda env config vars set UV_CACHE_DIR="$CONDA_PREFIX/.uv-cache"
+conda env config vars set PLAYWRIGHT_BROWSERS_PATH="$CONDA_PREFIX/.playwright"
+conda deactivate
+conda activate molmoweb
 ```
 
 ---
@@ -72,14 +105,17 @@ uv run playwright install --with-deps chromium
 ### Environment Variables
 
 ```bash
-# Browserbase (required when --env_type browserbase)
+# Not required for the default local workflow.
+# Browserbase is only needed if you explicitly choose a cloud browser instead of local Chromium.
+# Browserbase (required only when using Browserbase/local=False)
 export BROWSERBASE_API_KEY="your-browserbase-api-key"
 export BROWSERBASE_PROJECT_ID="your-browserbase-project-id"
 
 # Google Gemini (required for gemini_cua, gemini_axtree, and Gemini-based judges)
 export GOOGLE_API_KEY="your-google-api-key"
 
-# OpenAI (required for gpt_axtree and GPT-based judges like webvoyager)
+# Not required for the default MolmoWeb FastAPI server or local inference client.
+# OpenAI is only needed for gpt_axtree and GPT-based judges like webvoyager.
 export OPENAI_API_KEY="your-openai-api-key"
 ```
 
@@ -157,6 +193,80 @@ resp = requests.post("http://127.0.0.1:8001/predict", json={
     "image_base64": image_b64,
 })
 print(resp.json())
+```
+
+---
+
+## Service Endpoints
+
+Main model service, default port `8001`:
+
+```text
+POST http://127.0.0.1:8001/predict
+GET  http://127.0.0.1:8001/status
+GET  http://127.0.0.1:8001/status?format=json
+```
+
+- `POST /predict`: model inference for one screenshot + prompt pair.
+- `GET /status`: HTML status page when opened from a browser, including GPU memory, active jobs, PID, log file, and checkpoint information.
+- `GET /status?format=json`: machine-readable JSON status payload.
+
+WebUI service, default port `8010`:
+
+```text
+GET  http://127.0.0.1:8010/
+GET  http://127.0.0.1:8010/api/status
+GET  http://127.0.0.1:8010/api/sessions
+POST http://127.0.0.1:8010/api/sessions
+GET  http://127.0.0.1:8010/api/sessions/{session_id}
+POST http://127.0.0.1:8010/api/sessions/{session_id}/messages
+POST http://127.0.0.1:8010/api/sessions/{session_id}/close
+GET  http://127.0.0.1:8010/api/model-service/status
+GET  http://127.0.0.1:8010/api/model-service/logs
+```
+
+---
+
+## WebUI Sessions
+
+The repository now includes a separate WebUI under `webui/` for multi-turn browser sessions.
+
+- One browser session is created per WebUI session.
+- Session artifacts are written under `logs/webui_sessions/<session_id>/`.
+- The first completed turn can auto-generate a session title.
+- The UI keeps the browser session alive across follow-up prompts.
+- If the browser window is closed, the session is automatically marked as archived and no longer appears as live.
+
+Linux helper scripts:
+
+```bash
+bash scripts/start_server_mylinux.sh ./checkpoints/MolmoWeb-8B 8001
+bash scripts/stop_server_mylinux.sh 8001
+bash scripts/start_webui_mylinux.sh 8010
+bash scripts/stop_webui_mylinux.sh 8010
+```
+
+The stop scripts terminate the full wrapper + child process tree so stale `uvicorn` workers are not left behind.
+
+---
+
+## Workflow Diagram
+
+```mermaid
+flowchart LR
+  U[User Browser] -->|Open UI| W[WebUI Frontend\nwebui/static]
+  W -->|REST calls| A[WebUI FastAPI\nwebui/app.py]
+  A -->|Create session / run turn| S[SessionManager\nwebui/session_manager.py]
+  S -->|Dedicated worker thread\none per session| C[MolmoWeb Client\ninference/client.py]
+  C -->|Controls browser| B[Playwright Browser Env\nutils/envs]
+  C -->|Screenshot + prompt| M[Model Server\nagent/fastapi_model_server.py]
+  M -->|Predict action| P[Predictor Pool\nHF or Native backend]
+  P --> M
+  M --> C
+  C -->|Trajectory, screenshots, transcript| F[Session Artifacts\nlogs/webui_sessions]
+  F --> A
+  A --> W
+  M -->|/status, /status?format=json| U
 ```
 
 ---

@@ -15,6 +15,7 @@ dependencies = [
     "jinja2>=3.1.5",
     "openai>=2.8.1",
     "playwright==1.44",
+    "pillow>=10.4.0",
     "python-fasthtml>=0.12.4",
     "tenacity==9.1.2",
     "transformers>=4.51,<5",

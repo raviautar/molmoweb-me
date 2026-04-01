@@ -72,12 +72,17 @@ class MolmoWeb:
         keep_alive: bool = True,
         headless: bool = True,
         verbose: bool = True,
+        session_id: str | None = None,
+        session_title: str | None = None,
     ):
         self.endpoint = endpoint or os.environ.get("MOLMOWEB_ENDPOINT")
         self.local = local
         self.keep_alive = keep_alive
         self.headless = headless
         self.verbose = verbose
+        self.session_id = session_id
+        self.session_title = session_title
+        self.turn_index = 0
         self.agent = self._create_agent() if self.endpoint else None
         self.env = None
         self.last_obs = None
@@ -142,9 +147,9 @@ class MolmoWeb:
         wait=wait_fixed(5),
         retry=retry_if_exception_type(Exception),
     )
-    def _predict(self, obs: dict, query: str) -> dict:
+    def _predict(self, obs: dict, query: str, request_context: dict | None = None) -> dict:
         obs["goal"] = query
-        _, action = self.agent.predict_action(obs)
+        _, action = self.agent.predict_action(obs, request_context=request_context)
         return action
 
     def _step_env(self, action: dict) -> dict:
@@ -152,7 +157,7 @@ class MolmoWeb:
         action_obj = action["action_output"].action
         return self.env.step(action_obj)
 
-    def _run_one(self, obs: dict, query: str) -> tuple[dict | None, Step]:
+    def _run_one(self, obs: dict, query: str, step_num: int, max_steps: int, turn_index: int) -> tuple[dict | None, Step]:
         h, w = obs["screenshot"].shape[:2]
         if (w, h) != (self.VIEWPORT_WIDTH, self.VIEWPORT_HEIGHT):
             img = Image.fromarray(obs["screenshot"]).resize(
@@ -160,8 +165,18 @@ class MolmoWeb:
             )
             obs["screenshot"] = np.array(img)
         state = self._get_state(obs)
+        request_context = {
+            "session_id": self.session_id or "",
+            "session_title": self.session_title or "",
+            "turn_index": turn_index,
+            "step_index": step_num,
+            "max_steps": max_steps,
+            "page_url": state.page_url,
+            "page_title": state.page_title,
+            "query": query,
+        }
         try:
-            action = self._predict(obs, query)
+            action = self._predict(obs, query, request_context=request_context)
             prediction: ActionOutput = action["action_output"]
         except Exception as e:
             return None, Step(state=state, prediction=None, error=str(e))
@@ -174,11 +189,11 @@ class MolmoWeb:
 
         return next_obs, Step(state=state, prediction=prediction, error=None)
 
-    def _run_iters(self, obs: dict, query: str, max_steps: int) -> Trajectory:
+    def _run_iters(self, obs: dict, query: str, max_steps: int, turn_index: int) -> Trajectory:
         traj = Trajectory()
         curr_obs = obs
         for step_num in range(1, max_steps + 1):
-            next_obs, step = self._run_one(curr_obs, query)
+            next_obs, step = self._run_one(curr_obs, query, step_num, max_steps, turn_index)
             traj.steps.append(step)
 
             if step.error is not None:
@@ -199,29 +214,32 @@ class MolmoWeb:
 
         return traj
 
-    def fresh_run(self, query: str, max_steps: int) -> Trajectory:
+    def fresh_run(self, query: str, max_steps: int, turn_index: int) -> Trajectory:
         with self._pw_context():
             self.last_obs = None
             self.env = self._create_env()
             self.agent.reset()
             obs, _ = self.env.reset()
             self._pw_event_loop = asyncio._get_running_loop()
-            return self._run_iters(obs, query, max_steps)
+            return self._run_iters(obs, query, max_steps, turn_index)
 
-    def continue_run(self, query: str, max_steps: int) -> Trajectory:
+    def continue_run(self, query: str, max_steps: int, turn_index: int) -> Trajectory:
         with self._pw_context():
             if self.last_obs is None:
                 raise ValueError("Cannot continue without a previous observation")
             self.agent.reset()
             obs = self.env._get_obs()
-            return self._run_iters(obs, query, max_steps)
+            return self._run_iters(obs, query, max_steps, turn_index)
 
     def run(self, query: str, max_steps: int = 15) -> Trajectory:
         with self._pw_context():
+            current_turn_index = self.turn_index + 1
             if self.env is None:
-                traj = self.fresh_run(query, max_steps)
+                traj = self.fresh_run(query, max_steps, current_turn_index)
             else:
-                traj = self.continue_run(query, max_steps)
+                traj = self.continue_run(query, max_steps, current_turn_index)
+
+            self.turn_index = current_turn_index
 
             if not self.keep_alive:
                 self.close()

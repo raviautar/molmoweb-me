@@ -33,12 +33,17 @@ class FastApiActionPredictor:
     def predict(self, prompt: str, image_np: np.ndarray, past_actions: list | None = None, **kwargs) -> str | None:
         from utils.vis_utils.image import image_to_base64
         try:
+            # Step 1: Build the base payload shared by all FastAPI prediction requests.
             payload = {"prompt": prompt, "image_base64": image_to_base64(image_np)}
             if past_actions is not None:
                 payload["past_actions"] = past_actions
             payload["temperature"] = self.temperature
             payload["top_p"] = self.top_p
+            request_context = kwargs.get("request_context")
+            if request_context is not None:
+                payload["request_context"] = request_context
 
+            # Step 2: Send the prediction request to the model server.
             resp = requests.post(f"{self.endpoint}/predict", json=payload)
             if resp.status_code != 200:
                 print(f"[ERROR] FastAPI {self.endpoint} returned {resp.status_code}: {resp.text}")

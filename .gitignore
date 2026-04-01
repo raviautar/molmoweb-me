@@ -222,3 +222,4 @@ beaker/
 
 checkpoints/
 *.html
+logs/

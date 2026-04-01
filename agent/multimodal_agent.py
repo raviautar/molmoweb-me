@@ -224,7 +224,7 @@ class MultimodalAgent(AgentBase):
 
         return user_message
 
-    def predict_action(self, obs: dict[str, Any]) -> dict[str, Any]:
+    def predict_action(self, obs: dict[str, Any], request_context: dict[str, Any] | None = None) -> dict[str, Any]:
         user_message = self.get_user_message(obs)
         prompt = f"{self.system_message}: {user_message}"
 
@@ -245,6 +245,7 @@ class MultimodalAgent(AgentBase):
             prompt=prompt,
             image_np=image,
             past_actions=past_actions_dict,
+            request_context=request_context,
         )
         # print(f"[{datetime.now().strftime('%H:%M:%S')}] Raw predicted text: {pred_text}")
 
