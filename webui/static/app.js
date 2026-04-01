@@ -13,6 +13,7 @@ const state = {
   galleryIndex: 0,
   sidebarOpen: false,
   backgroundRefreshInFlight: false,
+  expandedThoughtKeys: new Set(),
 };
 
 const elements = {
@@ -162,25 +163,38 @@ function escapeHtml(value) {
 }
 
 function linkifyText(value) {
-  // Step 1: Escape the raw text first so linkification never injects untrusted HTML.
-  const escapedValue = escapeHtml(value || "");
+  // Step 1: Walk the raw text so URL extraction preserves the exact source characters.
+  const rawValue = String(value || "");
+  const urlPattern = /(https?:\/\/[^\s<>"]+)/g;
+  const chunks = [];
+  let cursor = 0;
+  let match = urlPattern.exec(rawValue);
 
-  // Step 2: Replace plain-text URLs with safe anchors while preserving surrounding text.
-  return escapedValue.replace(/(https?:\/\/[^\s<]+)/g, (rawMatch) => {
-    let urlText = rawMatch;
+  // Step 2: Escape non-URL text and wrap URL text in a safe anchor without altering encoded characters.
+  while (match) {
+    const matchedUrl = match[0];
+    const matchIndex = match.index;
+    let normalizedUrl = matchedUrl;
     let trailingText = "";
 
-    while (/[),.;!?]$/.test(urlText)) {
-      trailingText = urlText.slice(-1) + trailingText;
-      urlText = urlText.slice(0, -1);
+    while (/[),.;!?]$/.test(normalizedUrl)) {
+      trailingText = normalizedUrl.slice(-1) + trailingText;
+      normalizedUrl = normalizedUrl.slice(0, -1);
     }
 
-    if (!urlText) {
-      return rawMatch;
+    chunks.push(escapeHtml(rawValue.slice(cursor, matchIndex)));
+    if (normalizedUrl) {
+      const escapedUrl = escapeHtml(normalizedUrl);
+      chunks.push(`<a class="inline-link" href="${escapedUrl}" target="_blank" rel="noopener noreferrer">${escapedUrl}</a>`);
     }
+    chunks.push(escapeHtml(trailingText));
+    cursor = matchIndex + matchedUrl.length;
+    match = urlPattern.exec(rawValue);
+  }
 
-    return `<a class="inline-link" href="${urlText}" target="_blank" rel="noopener noreferrer">${urlText}</a>${trailingText}`;
-  });
+  // Step 3: Append the remaining plain text after the final URL match.
+  chunks.push(escapeHtml(rawValue.slice(cursor)));
+  return chunks.join("");
 }
 
 function renderLinkedTextBlock(value, className = "") {
@@ -573,6 +587,7 @@ function renderStepThoughtMessages(turn, isSelectedTurn) {
   // Step 2: Render each step as a compact assistant-side reasoning card with collapsible details.
   return turn.steps
     .map((step) => {
+      const thoughtKey = `${turn.turn_index}-${step.step_index}`;
       const thoughtText = step.thought || step.action_text || step.message || step.error || "No structured text";
       const summaryText = thoughtText.length > 140 ? `${thoughtText.slice(0, 140).trim()}...` : thoughtText;
       const pageTitle = step.page_title || "Untitled page";
@@ -581,10 +596,11 @@ function renderStepThoughtMessages(turn, isSelectedTurn) {
       const actionText = step.action_text || "";
       const stepMessage = step.message || "";
       const stepError = step.error || "";
+      const openAttribute = state.expandedThoughtKeys.has(thoughtKey) ? " open" : "";
       return `
         <div class="chat-row assistant-row thought-row" data-turn-index="${turn.turn_index}">
           <article class="chat-card assistant thought-card ${isSelectedTurn ? "active" : ""}">
-            <details class="thought-disclosure">
+            <details class="thought-disclosure" data-thought-key="${escapeHtml(thoughtKey)}"${openAttribute}>
               <summary>
                 <span class="thought-summary-eyebrow">Thought ${escapeHtml(String(step.step_index))} • ${escapeHtml(actionName)}</span>
                 <span class="thought-summary-text">${escapeHtml(summaryText)}</span>
@@ -742,7 +758,10 @@ function renderChat(session) {
 
   // Step 4: Attach click handlers so any turn card updates the artifact inspector.
   elements.chatLog.querySelectorAll(".chat-row").forEach((row) => {
-    row.addEventListener("click", () => {
+    row.addEventListener("click", (event) => {
+      if (event.target instanceof Element && event.target.closest("button, a, summary, details")) {
+        return;
+      }
       if (!row.dataset.turnIndex) {
         return;
       }
@@ -752,7 +771,25 @@ function renderChat(session) {
     });
   });
 
-  // Step 5: Attach copy handlers to user prompt cards.
+  // Step 5: Persist thought disclosure state so polling does not collapse expanded reasoning cards.
+  elements.chatLog.querySelectorAll(".thought-disclosure").forEach((details) => {
+    details.addEventListener("click", (event) => {
+      event.stopPropagation();
+    });
+    details.addEventListener("toggle", () => {
+      const thoughtKey = details.dataset.thoughtKey || "";
+      if (!thoughtKey) {
+        return;
+      }
+      if (details.open) {
+        state.expandedThoughtKeys.add(thoughtKey);
+      } else {
+        state.expandedThoughtKeys.delete(thoughtKey);
+      }
+    });
+  });
+
+  // Step 6: Attach copy handlers to user prompt cards.
   elements.chatLog.querySelectorAll(".copy-prompt-button").forEach((button) => {
     button.addEventListener("click", async (event) => {
       event.preventDefault();
