@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from PIL import Image
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
@@ -189,12 +190,23 @@ class MolmoWeb:
 
         return next_obs, Step(state=state, prediction=prediction, error=None)
 
-    def _run_iters(self, obs: dict, query: str, max_steps: int, turn_index: int) -> Trajectory:
+    def _run_iters(
+        self,
+        obs: dict,
+        query: str,
+        max_steps: int,
+        turn_index: int,
+        step_callback: Callable[[int, Trajectory], None] | None = None,
+    ) -> Trajectory:
         traj = Trajectory()
         curr_obs = obs
         for step_num in range(1, max_steps + 1):
             next_obs, step = self._run_one(curr_obs, query, step_num, max_steps, turn_index)
             traj.steps.append(step)
+
+            # Step 1: Publish step progress immediately so callers can persist live artifacts.
+            if step_callback is not None:
+                step_callback(step_num, traj)
 
             if step.error is not None:
                 if self.verbose:
@@ -214,30 +226,47 @@ class MolmoWeb:
 
         return traj
 
-    def fresh_run(self, query: str, max_steps: int, turn_index: int) -> Trajectory:
+    def fresh_run(
+        self,
+        query: str,
+        max_steps: int,
+        turn_index: int,
+        step_callback: Callable[[int, Trajectory], None] | None = None,
+    ) -> Trajectory:
         with self._pw_context():
             self.last_obs = None
             self.env = self._create_env()
             self.agent.reset()
             obs, _ = self.env.reset()
             self._pw_event_loop = asyncio._get_running_loop()
-            return self._run_iters(obs, query, max_steps, turn_index)
+            return self._run_iters(obs, query, max_steps, turn_index, step_callback=step_callback)
 
-    def continue_run(self, query: str, max_steps: int, turn_index: int) -> Trajectory:
+    def continue_run(
+        self,
+        query: str,
+        max_steps: int,
+        turn_index: int,
+        step_callback: Callable[[int, Trajectory], None] | None = None,
+    ) -> Trajectory:
         with self._pw_context():
             if self.last_obs is None:
                 raise ValueError("Cannot continue without a previous observation")
             self.agent.reset()
             obs = self.env._get_obs()
-            return self._run_iters(obs, query, max_steps, turn_index)
+            return self._run_iters(obs, query, max_steps, turn_index, step_callback=step_callback)
 
-    def run(self, query: str, max_steps: int = 15) -> Trajectory:
+    def run(
+        self,
+        query: str,
+        max_steps: int = 15,
+        step_callback: Callable[[int, Trajectory], None] | None = None,
+    ) -> Trajectory:
         with self._pw_context():
             current_turn_index = self.turn_index + 1
             if self.env is None:
-                traj = self.fresh_run(query, max_steps, current_turn_index)
+                traj = self.fresh_run(query, max_steps, current_turn_index, step_callback=step_callback)
             else:
-                traj = self.continue_run(query, max_steps, current_turn_index)
+                traj = self.continue_run(query, max_steps, current_turn_index, step_callback=step_callback)
 
             self.turn_index = current_turn_index
 

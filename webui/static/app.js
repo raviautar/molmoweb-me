@@ -48,9 +48,13 @@ const elements = {
   sessionSummary: document.getElementById("session-summary"),
   snapshotGrid: document.getElementById("snapshot-grid"),
   stepLog: document.getElementById("step-log"),
+  toastBanner: document.getElementById("toast-banner"),
+  toastBannerText: document.getElementById("toast-banner-text"),
   trajectoryLink: document.getElementById("trajectory-link"),
   workspaceTitle: document.getElementById("workspace-title"),
 };
+
+let toastTimerId = null;
 
 const buttonLabels = new Map();
 
@@ -115,6 +119,64 @@ function showArchivedMessage(message) {
   // Step 2: Render the archived-session explanation for the selected session.
   elements.archivedBannerText.textContent = message;
   elements.archivedBanner.classList.remove("hidden");
+}
+
+function showToast(message) {
+  // Step 1: Hide any existing toast timer before showing the next message.
+  if (toastTimerId !== null) {
+    window.clearTimeout(toastTimerId);
+  }
+
+  // Step 2: Render the new toast message.
+  elements.toastBannerText.textContent = message;
+  elements.toastBanner.classList.remove("hidden");
+
+  // Step 3: Clear the toast after a short delay.
+  toastTimerId = window.setTimeout(() => {
+    elements.toastBanner.classList.add("hidden");
+    elements.toastBannerText.textContent = "";
+    toastTimerId = null;
+  }, 3200);
+}
+
+function formatCompletionStatus(status) {
+  // Step 1: Return an empty label when the turn has no completion state.
+  if (!status) {
+    return "";
+  }
+
+  // Step 2: Convert the machine-readable status into an operator-facing label.
+  return status.replaceAll("_", " ");
+}
+
+function renderCompletionBadge(status) {
+  // Step 1: Skip badge rendering when no completion status is present.
+  if (!status) {
+    return "";
+  }
+
+  // Step 2: Render a compact badge that makes completion states visible in the UI.
+  const statusClass = status.replaceAll("_", "-");
+  return `<span class="completion-badge ${escapeHtml(statusClass)}">${escapeHtml(formatCompletionStatus(status))}</span>`;
+}
+
+async function copyTextToClipboard(text) {
+  // Step 1: Prefer the async clipboard API when it is available.
+  if (navigator.clipboard && window.isSecureContext) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  // Step 2: Fall back to a temporary textarea for non-secure contexts.
+  const helper = document.createElement("textarea");
+  helper.value = text;
+  helper.setAttribute("readonly", "true");
+  helper.style.position = "fixed";
+  helper.style.opacity = "0";
+  document.body.appendChild(helper);
+  helper.select();
+  document.execCommand("copy");
+  document.body.removeChild(helper);
 }
 
 function setButtonBusy(button, isBusy, busyText) {
@@ -234,12 +296,21 @@ function renderSessionGroup(container, sessions) {
   container.innerHTML = sessions
     .map((session) => {
       const isActive = session.session_id === state.selectedSessionId;
+      const completionBadge = renderCompletionBadge(session.completion_status || "");
+      const sessionCardClass = session.completion_status === "max_steps"
+        ? "max-steps"
+        : session.completion_status === "error"
+          ? "error"
+          : "";
       const latestSnapshot = session.latest_snapshot_url
         ? `<a class="artifact-link" href="${session.latest_snapshot_url}" target="_blank" rel="noreferrer">Latest Snapshot</a>`
         : "";
       return `
-        <article class="session-card ${isActive ? "active" : ""}" data-session-id="${session.session_id}">
-          <div class="status-pill">${session.live ? "Live Browser" : "Artifact Only"}</div>
+        <article class="session-card ${sessionCardClass} ${isActive ? "active" : ""}" data-session-id="${session.session_id}">
+          <div class="session-card-header">
+            <div class="status-pill">${session.live ? "Live Browser" : "Artifact Only"}</div>
+            ${completionBadge}
+          </div>
           <h3>${escapeHtml(session.title)}</h3>
           <div class="session-card-meta">${escapeHtml(summarizeSession(session))}</div>
           <div class="session-card-meta">Endpoint: ${escapeHtml(session.endpoint || "")}</div>
@@ -304,6 +375,12 @@ function getArchivedMessage(session) {
   if (session.last_error === "Browser window closed") {
     return "This session is archived because the browser window was closed. Its artifacts remain available, but you need Start Fresh to continue browsing.";
   }
+  if ((session.run_state || "") === "stale_running") {
+    return "This session was still running when the model server or WebUI was stopped. Its live browser was detached and the run was marked stale.";
+  }
+  if ((session.run_state || "") === "stale") {
+    return "This session was marked stale because the model server was stopped. Its saved artifacts remain available for review.";
+  }
   if ((session.run_state || "") === "closed") {
     return "This session is archived. The live browser is no longer attached, but all saved artifacts remain available for review.";
   }
@@ -322,17 +399,32 @@ function renderChat(session) {
   const cards = [];
   session.turns.forEach((turn) => {
     const isSelectedTurn = state.selectedTurnIndex === turn.turn_index;
+    const completionStatus = turn.completion_status || "";
+    const assistantMetaParts = [turn.final_page_title || "No page title", turn.final_page_url || ""];
+    if (completionStatus) {
+      assistantMetaParts.push(completionStatus.replaceAll("_", " "));
+    }
     cards.push(`
       <article class="chat-card user ${isSelectedTurn ? "active" : ""}" data-turn-index="${turn.turn_index}">
-        <div class="chat-card-meta">Turn ${turn.turn_index} • ${escapeHtml(formatDate(turn.started_at))}</div>
-        <h3>User</h3>
+        <div class="chat-card-header">
+          <div>
+            <div class="chat-card-meta">Turn ${turn.turn_index} • ${escapeHtml(formatDate(turn.started_at))}</div>
+            <h3>User</h3>
+          </div>
+          <button class="copy-prompt-button" type="button" data-copy-prompt="${escapeHtml(turn.prompt)}">Copy Prompt</button>
+        </div>
         <pre>${escapeHtml(turn.prompt)}</pre>
       </article>
     `);
     cards.push(`
-      <article class="chat-card assistant ${isSelectedTurn ? "active" : ""}" data-turn-index="${turn.turn_index}">
-        <div class="chat-card-meta">${escapeHtml(turn.final_page_title || "No page title")} • ${escapeHtml(turn.final_page_url || "")}</div>
-        <h3>Assistant</h3>
+      <article class="chat-card assistant ${completionStatus === "max_steps" ? "max-steps" : ""} ${completionStatus === "error" ? "error" : ""} ${isSelectedTurn ? "active" : ""}" data-turn-index="${turn.turn_index}">
+        <div class="chat-card-header">
+          <div>
+            <div class="chat-card-meta">${escapeHtml(assistantMetaParts.filter(Boolean).join(" • "))}</div>
+            <h3>Assistant</h3>
+          </div>
+          ${renderCompletionBadge(completionStatus)}
+        </div>
         <pre>${escapeHtml(turn.assistant_text || turn.final_error || "No textual output")}</pre>
       </article>
     `);
@@ -360,6 +452,20 @@ function renderChat(session) {
       state.selectedTurnIndex = Number(card.dataset.turnIndex);
       renderInspector(session);
       renderChat(session);
+    });
+  });
+
+  // Step 4: Attach copy handlers to user prompt cards.
+  elements.chatLog.querySelectorAll(".copy-prompt-button").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      try {
+        await copyTextToClipboard(button.dataset.copyPrompt || "");
+        showToast("Prompt copied to clipboard.");
+      } catch (_error) {
+        showError("Could not copy the prompt to the clipboard.");
+      }
     });
   });
 }
@@ -398,8 +504,9 @@ function renderInspector(session) {
   const turn = session.turns.find((candidate) => candidate.turn_index === state.selectedTurnIndex) || null;
 
   // Step 3: Render the inspector header and artifact links.
+  const completionSuffix = turn && turn.completion_status ? ` • ${turn.completion_status.replaceAll("_", " ")}` : "";
   elements.artifactSummary.textContent = turn
-    ? `Turn ${turn.turn_index} • ${turn.step_count} steps • ${turn.final_page_title || "No final page title"}`
+    ? `Turn ${turn.turn_index} • ${turn.step_count} steps${completionSuffix} • ${turn.final_page_title || "No final page title"}`
     : "No turns have been run for this session yet.";
   setArtifactLink(elements.trajectoryLink, turn ? turn.trajectory_html_url : "");
   setArtifactLink(elements.latestSnapshotLink, session.latest_snapshot_url || "");
@@ -631,8 +738,14 @@ async function sendPrompt() {
     await loadModelServiceData();
     await loadSessions();
     renderWorkspace();
+    if (state.sessionDetail && state.sessionDetail.turns.length > 0) {
+      const latestTurn = state.sessionDetail.turns[state.sessionDetail.turns.length - 1];
+      const completionStatus = latestTurn.completion_status || "answered";
+      showToast(`Run finished: ${formatCompletionStatus(completionStatus)}.`);
+    }
   } catch (error) {
     showError(error.message || "The browser session failed.");
+    showToast("Run failed.");
     await loadAppStatus();
     await loadModelServiceData();
     if (state.selectedSessionId) {
@@ -662,11 +775,34 @@ async function closeSelectedSession() {
     await loadModelServiceData();
     await loadSessions();
     renderWorkspace();
+    showToast("Session closed.");
   } catch (error) {
     showError(error.message || "Could not close the session.");
   } finally {
     setBusy(false);
   }
+}
+
+async function refreshActiveWorkspace() {
+  // Step 1: Keep the status cards and session lists current.
+  await loadAppStatus();
+  await loadModelServiceData();
+  await loadSessions();
+
+  // Step 2: Refresh the selected session detail when one is active.
+  if (state.selectedSessionId) {
+    const selectedTurnIndex = state.selectedTurnIndex;
+    state.sessionDetail = await fetchJson(`/api/sessions/${state.selectedSessionId}`);
+    if (selectedTurnIndex && state.sessionDetail.turns.some((turn) => turn.turn_index === selectedTurnIndex)) {
+      state.selectedTurnIndex = selectedTurnIndex;
+    } else if (state.sessionDetail.turns.length > 0) {
+      state.selectedTurnIndex = state.sessionDetail.turns[state.sessionDetail.turns.length - 1].turn_index;
+    }
+  }
+
+  // Step 3: Re-render the current workspace with the latest backend state.
+  renderSessionList();
+  renderWorkspace();
 }
 
 async function refreshSelectedSession() {
@@ -780,21 +916,12 @@ async function initialize() {
 
   // Step 3: Keep the sidebar counts fresh while preserving the current selection.
   window.setInterval(async () => {
-    if (state.isBusy) {
-      return;
-    }
     try {
-      await loadAppStatus();
-      await loadModelServiceData();
-      await loadSessions();
-      if (state.selectedSessionId) {
-        renderSessionList();
-      }
-      renderWorkspace();
+      await refreshActiveWorkspace();
     } catch (error) {
       showError(error.message || "Background refresh failed.");
     }
-  }, 5000);
+  }, 1500);
 }
 
 initialize().catch((error) => {

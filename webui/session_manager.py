@@ -126,7 +126,13 @@ class SessionManager:
             metadata.setdefault("current_step_index", 0)
             metadata.setdefault("current_prompt", "")
             metadata.setdefault("last_error", "")
+            metadata.setdefault("completion_status", "")
+            if metadata.get("live", False):
+                metadata["closed_at"] = metadata.get("closed_at") or metadata.get("updated_at", "")
+                if metadata.get("run_state") == "running":
+                    metadata["run_state"] = "closed"
             metadata["live"] = False
+            _write_json_file(session_file, metadata)
             self._sessions[session_id] = SessionRuntime(
                 session_id=session_id,
                 metadata=metadata,
@@ -205,7 +211,7 @@ class SessionManager:
         # Step 2: Filter out any empty records that may come from interrupted writes.
         return [turn_record for turn_record in turn_records if turn_record]
 
-    def _extract_assistant_text(self, trajectory: Trajectory) -> str:
+    def _extract_assistant_text(self, trajectory: Trajectory, max_steps: int) -> tuple[str, str]:
         # Step 1: Search for the first explicit answer emitted by the agent.
         last_message = ""
         for step in trajectory.steps:
@@ -215,16 +221,100 @@ class SessionManager:
             if isinstance(action, SendMsgToUser):
                 last_message = action.msg
                 if action.msg.startswith("[ANSWER]"):
-                    return action.msg.removeprefix("[ANSWER]").strip()
+                    return action.msg.removeprefix("[ANSWER]").strip(), "answered"
+                if action.msg.startswith("[EXIT]"):
+                    return action.msg.removeprefix("[EXIT]").strip() or action.msg, "stopped"
 
-        # Step 2: Fall back to the last user-visible message or the last structured action string.
+        # Step 2: Surface explicit terminal errors before falling back to action strings.
+        if trajectory.steps and trajectory.steps[-1].error:
+            return str(trajectory.steps[-1].error), "error"
+
+        # Step 3: Report that the run exhausted the step budget when no final answer was produced.
+        if trajectory.steps and len(trajectory.steps) >= max_steps:
+            return "Run reached the max step limit before producing a final answer.", "max_steps"
+
+        # Step 4: Fall back to the last user-visible message or the last structured action string.
         if last_message:
-            return last_message.removeprefix("[EXIT]").strip() or last_message
+            return last_message.removeprefix("[EXIT]").strip() or last_message, "message"
 
         if trajectory.steps and trajectory.steps[-1].prediction is not None:
-            return trajectory.steps[-1].prediction.to_str()
+            return trajectory.steps[-1].prediction.to_str(), "action"
 
-        return ""
+        return "", "empty"
+
+    def _live_turn_summary(self, trajectory: Trajectory) -> str:
+        # Step 1: Show a generic progress message while no steps have been recorded yet.
+        if not trajectory.steps:
+            return "Run in progress..."
+
+        last_step = trajectory.steps[-1]
+
+        # Step 2: Surface errors as soon as they occur.
+        if last_step.error:
+            return str(last_step.error)
+
+        # Step 3: Prefer user-facing messages when the agent has emitted one.
+        if last_step.prediction is not None and isinstance(last_step.prediction.action, SendMsgToUser):
+            return last_step.prediction.action.msg
+
+        # Step 4: Fall back to the latest structured action while the run is still in progress.
+        if last_step.prediction is not None:
+            return last_step.prediction.to_str()
+
+        return "Run in progress..."
+
+    def _write_live_turn_artifacts(
+        self,
+        runtime: SessionRuntime,
+        turn_index: int,
+        prompt: str,
+        max_steps: int,
+        turn_started_at: str,
+        trajectory: Trajectory,
+    ) -> None:
+        # Step 1: Stop early when there is no recorded step yet.
+        if not trajectory.steps:
+            return
+
+        turn_dir = self._turns_dir(runtime) / f"turn_{turn_index:03d}"
+        screenshots_dir = turn_dir / "screenshots"
+        screenshots_dir.mkdir(parents=True, exist_ok=True)
+        latest_step = trajectory.steps[-1]
+        screenshot_path = screenshots_dir / f"step_{len(trajectory.steps) - 1:03d}.png"
+
+        # Step 2: Persist the latest screenshot as soon as it becomes available.
+        if latest_step.state is not None and latest_step.state.img is not None and not screenshot_path.exists():
+            latest_step.state.img.save(screenshot_path, format="PNG")
+
+        # Step 3: Build the current live turn record that the UI can poll while the run is active.
+        snapshot_paths = sorted(screenshots_dir.glob("step_*.png"))
+        partial_turn = {
+            "turn_index": turn_index,
+            "prompt": prompt,
+            "assistant_text": self._live_turn_summary(trajectory),
+            "completion_status": "running",
+            "started_at": turn_started_at,
+            "completed_at": "",
+            "max_steps": max_steps,
+            "trajectory_html_url": "",
+            "trajectory_html_path": "",
+            "snapshot_urls": [self._artifact_url(path) for path in snapshot_paths],
+            "snapshot_paths": [str(path) for path in snapshot_paths],
+            "step_count": len(trajectory.steps),
+            "steps": self._build_step_summaries(runtime.session_id, turn_index, trajectory),
+            "final_page_url": latest_step.state.page_url if latest_step.state is not None else "",
+            "final_page_title": latest_step.state.page_title if latest_step.state is not None else "",
+            "final_error": latest_step.error or "",
+        }
+        _write_json_file(turn_dir / "turn.json", partial_turn)
+
+        # Step 4: Keep the session summary current so the sidebar and workspace update live.
+        with runtime.lock:
+            runtime.metadata["updated_at"] = _utc_now_iso()
+            runtime.metadata["current_step_index"] = len(trajectory.steps)
+            runtime.metadata["latest_snapshot_url"] = self._artifact_url(snapshot_paths[-1]) if snapshot_paths else ""
+            runtime.metadata["completion_status"] = "running"
+            self._write_session_metadata(runtime)
 
     def _build_step_summaries(self, session_id: str, turn_index: int, trajectory: Trajectory) -> list[dict[str, Any]]:
         # Step 1: Iterate through the trajectory and map each step to a UI-friendly summary.
@@ -286,6 +376,7 @@ class SessionManager:
             "current_prompt": "",
             "last_prompt": "",
             "last_answer": "",
+            "completion_status": "",
             "last_error": "",
             "latest_snapshot_url": "",
             "session_dir": str(session_dir),
@@ -301,7 +392,8 @@ class SessionManager:
 
         # Step 2: Ask the model service for a concise session title using the final screenshot.
         title_prompt = (
-            "Generate a concise title of 3 to 6 words for this browser session. "
+            "Generate a concise neutral task label of 3 to 6 words for this browser session. "
+            "Do not answer the task. Do not infer an outcome that is not explicitly shown. "
             f"Original task: {prompt} "
             "Return plain text only."
         )
@@ -421,8 +513,9 @@ class SessionManager:
 
         # Step 4: Ask the worker thread whether the Playwright browser is still open.
         try:
-            is_live = bool(self._submit_task(runtime, "is_live", {}))
-        except Exception:
+            is_live = bool(self._submit_task(runtime, "is_live", {}, timeout_seconds=2.0))
+        except Exception as exc:
+            self._mark_runtime_inactive(runtime, run_state="closed", reason=f"Worker liveness check failed: {exc}")
             is_live = False
 
         # Step 5: Persist the archived state when the browser has been closed externally.
@@ -450,7 +543,13 @@ class SessionManager:
         if runtime.client is None:
             raise RuntimeError("Session worker did not initialize the browser client")
 
-    def _submit_task(self, runtime: SessionRuntime, task_type: str, payload: dict[str, Any]) -> Any:
+    def _submit_task(
+        self,
+        runtime: SessionRuntime,
+        task_type: str,
+        payload: dict[str, Any],
+        timeout_seconds: float | None = None,
+    ) -> Any:
         # Step 1: Validate that the session still has a live worker thread.
         if runtime.task_queue is None or runtime.worker_thread is None or not runtime.worker_thread.is_alive():
             raise RuntimeError("Session worker is not available")
@@ -458,7 +557,9 @@ class SessionManager:
         # Step 2: Enqueue the task and wait synchronously for the worker-thread result.
         task = WorkerTask(task_type=task_type, payload=payload)
         runtime.task_queue.put(task)
-        task.done_event.wait()
+        finished = task.done_event.wait(timeout=timeout_seconds)
+        if not finished:
+            raise TimeoutError(f"Session worker timed out while handling {task_type}")
         if task.error is not None:
             raise task.error
         return task.result
@@ -561,7 +662,18 @@ class SessionManager:
 
         try:
             # Step 3: Execute the browser turn entirely on the dedicated session thread.
-            trajectory = runtime.client.run(query=prompt, max_steps=effective_max_steps)
+            trajectory = runtime.client.run(
+                query=prompt,
+                max_steps=effective_max_steps,
+                step_callback=lambda _step_num, live_trajectory: self._write_live_turn_artifacts(
+                    runtime=runtime,
+                    turn_index=turn_index,
+                    prompt=prompt,
+                    max_steps=effective_max_steps,
+                    turn_started_at=turn_started_at,
+                    trajectory=live_trajectory,
+                ),
+            )
         except Exception as exc:
             # Step 4: Persist the failure cleanly so the UI can surface it without a stack trace.
             failure_time = _utc_now_iso()
@@ -586,7 +698,7 @@ class SessionManager:
         screenshots_dir = turn_dir / "screenshots"
         screenshots = save_trajectory_screenshots_png(trajectory, screenshots_dir, prefix="step")
         trajectory_html_path = Path(trajectory.save_html(output_path=str(turn_dir / "trajectory.html"), query=prompt))
-        assistant_text = self._extract_assistant_text(trajectory)
+        assistant_text, completion_status = self._extract_assistant_text(trajectory, effective_max_steps)
         step_summaries = self._build_step_summaries(runtime.session_id, turn_index, trajectory)
         latest_snapshot_path = Path(screenshots[-1]) if screenshots else None
         if latest_snapshot_path is not None:
@@ -606,6 +718,7 @@ class SessionManager:
             "turn_index": turn_index,
             "prompt": prompt,
             "assistant_text": assistant_text,
+            "completion_status": completion_status,
             "started_at": turn_started_at,
             "completed_at": turn_completed_at,
             "max_steps": effective_max_steps,
@@ -633,6 +746,7 @@ class SessionManager:
                 "timestamp": turn_completed_at,
                 "type": "assistant",
                 "text": assistant_text,
+                "completion_status": completion_status,
                 "turn_index": turn_index,
             },
         )
@@ -650,6 +764,7 @@ class SessionManager:
             runtime.metadata["current_prompt"] = ""
             runtime.metadata["last_prompt"] = prompt
             runtime.metadata["last_answer"] = assistant_text
+            runtime.metadata["completion_status"] = completion_status
             runtime.metadata["last_error"] = turn_record["final_error"]
             runtime.metadata["latest_snapshot_url"] = (
                 self._artifact_url(runtime.session_dir / "latest.png") if latest_snapshot_path is not None else ""
@@ -699,3 +814,31 @@ class SessionManager:
             runtime = self._sessions.get(session_id)
             if runtime is not None and runtime.worker_thread is not None:
                 self.close_session(session_id)
+
+    def mark_all_live_sessions_inactive(self, running_state: str, idle_state: str, reason: str) -> dict[str, int]:
+        # Step 1: Snapshot the current live runtimes under the registry lock.
+        with self._registry_lock:
+            runtimes = [runtime for runtime in self._sessions.values() if runtime.metadata.get("live", False)]
+
+        marked_count = 0
+        running_count = 0
+
+        # Step 2: Close any still-live browser workers and persist a stale/closed state for each session.
+        for runtime in runtimes:
+            was_running = runtime.metadata.get("run_state") == "running"
+            if was_running:
+                running_count += 1
+            try:
+                if runtime.worker_thread is not None and runtime.worker_thread.is_alive():
+                    self._submit_task(runtime, "close", {})
+            except Exception:
+                pass
+            self._mark_runtime_inactive(
+                runtime,
+                run_state=running_state if was_running else idle_state,
+                reason=f"{reason} while session was running" if was_running else reason,
+            )
+            marked_count += 1
+
+        # Step 3: Return a short summary for the caller and logs.
+        return {"marked_count": marked_count, "running_count": running_count}

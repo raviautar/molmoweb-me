@@ -8,6 +8,26 @@ LOG_DIR="${LOG_DIR:-$REPO_ROOT/logs}"
 PID_FILE="${PID_FILE:-$LOG_DIR/molmoweb_webui_port_${PORT}.pid}"
 
 
+mark_sessions_closed() {
+  local payload='{"reason":"WebUI stopped","running_state":"closed_running","idle_state":"closed"}'
+  local curl_timeout_seconds="3"
+
+  # Step 1: Ask the running WebUI process to mark any attached sessions closed before shutdown.
+  if command -v curl >/dev/null 2>&1; then
+    if curl -sf --max-time "$curl_timeout_seconds" -X POST "http://127.0.0.1:${PORT}/api/admin/mark-sessions-inactive" -H 'Content-Type: application/json' -d "$payload" >/dev/null; then
+      return
+    fi
+  fi
+
+  # Step 2: Fall back to directly rewriting the persisted session artifacts on disk.
+  python3 "$REPO_ROOT/scripts/mark_sessions_stale.py" \
+    --sessions-root "$REPO_ROOT/logs/webui_sessions" \
+    --reason "WebUI stopped" \
+    --running-state "closed_running" \
+    --idle-state "closed" >/dev/null 2>&1 || true
+}
+
+
 kill_process_tree() {
   local root_pid="$1"
   local child_pid=""
@@ -33,7 +53,10 @@ fi
 
 WEBUI_PID="$(cat "$PID_FILE")"
 
-# Step 2: Stop the tracked UI process if it is still alive.
+# Step 2: Mark live sessions closed before the WebUI process is terminated.
+mark_sessions_closed
+
+# Step 3: Stop the tracked UI process if it is still alive.
 if [[ -n "$WEBUI_PID" ]] && kill -0 "$WEBUI_PID" 2>/dev/null; then
   kill_process_tree "$WEBUI_PID"
   echo "Stopped MolmoWeb WebUI PID $WEBUI_PID"
@@ -41,5 +64,5 @@ else
   echo "Process $WEBUI_PID is not running"
 fi
 
-# Step 3: Remove the stale PID file after shutdown.
+# Step 4: Remove the stale PID file after shutdown.
 rm -f "$PID_FILE"

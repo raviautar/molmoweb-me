@@ -69,6 +69,12 @@ class SendMessageRequest(BaseModel):
     max_steps: int | None = Field(default=None, ge=1, le=50)
 
 
+class MarkSessionsInactiveRequest(BaseModel):
+    reason: str = Field(min_length=1)
+    running_state: str = Field(min_length=1)
+    idle_state: str = Field(min_length=1)
+
+
 @app.get("/")
 def index() -> FileResponse:
     # Step 1: Serve the standalone expert UI HTML shell.
@@ -178,3 +184,13 @@ def close_session(session_id: str) -> dict:
         return session_manager.close_session(session_id)
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/admin/mark-sessions-inactive")
+def mark_sessions_inactive(request: MarkSessionsInactiveRequest) -> dict:
+    # Step 1: Mark all live sessions as stale/closed for operational shutdown scenarios.
+    return session_manager.mark_all_live_sessions_inactive(
+        running_state=request.running_state,
+        idle_state=request.idle_state,
+        reason=request.reason,
+    )

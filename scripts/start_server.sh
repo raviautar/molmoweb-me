@@ -25,15 +25,18 @@ export NUM_PREDICTORS="${NUM_PREDICTORS:-1}"
 export TEMPERATURE="${TEMPERATURE:-0.7}"
 export TOP_P="${TOP_P:-0.8}"
 
-echo "Starting MolmoWeb server"
-echo "  Checkpoint:     $CKPT"
-echo "  Backend:        $PREDICTOR_TYPE"
-echo "  GPU workers:    $NUM_PREDICTORS"
-echo "  Temperature:    $TEMPERATURE"
-echo "  Top-p:          $TOP_P"
-echo "  Port:           $PORT"
-echo ""
-echo "Endpoint will be: http://127.0.0.1:$PORT/predict"
-echo ""
+log_info() {
+	# Step 1: Emit timestamped startup messages that match the repository log format.
+	printf '[INFO][%s] <%s>\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$1"
+}
 
-uv run uvicorn agent.fastapi_model_server:app --host 0.0.0.0 --port "$PORT"
+log_info "Starting MolmoWeb server"
+log_info "Checkpoint: $CKPT"
+log_info "Backend: $PREDICTOR_TYPE"
+log_info "GPU workers: $NUM_PREDICTORS"
+log_info "Temperature: $TEMPERATURE"
+log_info "Top-p: $TOP_P"
+log_info "Port: $PORT"
+log_info "Endpoint: http://127.0.0.1:$PORT/predict"
+
+uv run uvicorn agent.fastapi_model_server:app --host 0.0.0.0 --port "$PORT" --log-config config/uvicorn_logging.json

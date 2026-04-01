@@ -32,7 +32,7 @@ export UV_PROJECT_ENVIRONMENT="$CONDA_PREFIX"
 export UV_CACHE_DIR="$CONDA_PREFIX/.uv-cache"
 export PLAYWRIGHT_BROWSERS_PATH="$CONDA_PREFIX/.playwright"
 export MOLMOWEB_MODEL_ENDPOINT="'"$MODEL_ENDPOINT_VALUE"'"
-uv run uvicorn webui.app:app --host 0.0.0.0 --port "'"$PORT"'"
+uv run uvicorn webui.app:app --host 0.0.0.0 --port "'"$PORT"'" --log-config config/uvicorn_logging.json
 ' >"$LOG_FILE" 2>&1 &
 WEBUI_PID="$!"
 echo "$WEBUI_PID" > "$PID_FILE"
