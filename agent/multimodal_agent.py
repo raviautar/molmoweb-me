@@ -5,6 +5,8 @@ from typing import Any, Literal
 
 import numpy as np
 from jinja2 import Template
+
+import config
 from agent.actions import (
     ALL_ACTIONS,
     ActionOutput,
@@ -163,7 +165,7 @@ class MultimodalAgent(AgentBase):
     def __init__(
         self,
         endpoint_or_checkpoint: str,
-        system_message: str = "molmo_web_think",
+        system_message: str = config.MULTIMODAL_SYSTEM_MESSAGE,
         inference_mode: Literal["local", "fastapi", "modal", "native"] = "fastapi",
         device: str | None = None,
         api_key: str | None = None,

@@ -17,6 +17,7 @@ from PIL import Image
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_fixed
 from tqdm.auto import tqdm
 
+import config
 from agent.actions import ActionOutput, SendMsgToUser
 from agent.multimodal_agent import MultimodalAgent
 from inference.web_episode import State, Step, Trajectory
@@ -104,13 +105,13 @@ class MolmoWeb:
     def _create_agent(self) -> MultimodalAgent:
         return MultimodalAgent(
             endpoint_or_checkpoint=self.endpoint,
-            system_message="molmo_web_think",
+            system_message=config.MULTIMODAL_SYSTEM_MESSAGE,
             inference_mode="fastapi",
             max_past_steps=10,
             max_past_images=0,
         )
 
-    def _create_env(self, start_url: str = "about:blank"):
+    def _create_env(self, start_url: str = config.BROWSER_START_URL):
         if self.local:
             from utils.envs import SimpleEnv
 

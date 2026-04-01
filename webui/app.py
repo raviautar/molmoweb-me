@@ -11,13 +11,14 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 import requests
 
+import config
 from webui.session_manager import SessionManager
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 STATIC_ROOT = Path(__file__).resolve().parent / "static"
 ARTIFACT_ROOT = PROJECT_ROOT / "logs" / "webui_sessions"
-DEFAULT_MODEL_ENDPOINT = os.environ.get("MOLMOWEB_MODEL_ENDPOINT", "http://127.0.0.1:8001")
+DEFAULT_MODEL_ENDPOINT = config.get_default_model_endpoint()
 
 session_manager = SessionManager(
     sessions_root=ARTIFACT_ROOT,
@@ -27,7 +28,10 @@ session_manager = SessionManager(
 
 def _get_model_service_status() -> dict:
     # Step 1: Fetch the main model-service status payload from the configured endpoint.
-    response = requests.get(f"{DEFAULT_MODEL_ENDPOINT}/status", timeout=30)
+    response = requests.get(
+        f"{DEFAULT_MODEL_ENDPOINT}{config.MODEL_SERVICE_STATUS_PATH}",
+        timeout=config.DEFAULT_MODEL_SERVICE_TIMEOUT_SECONDS,
+    )
     response.raise_for_status()
     return response.json()
 
@@ -51,22 +55,22 @@ async def lifespan(_app: FastAPI):
     session_manager.close_all_live_sessions()
 
 
-app = FastAPI(title="MolmoWeb WebUI", lifespan=lifespan)
-app.mount("/webui-static", StaticFiles(directory=STATIC_ROOT), name="webui-static")
-app.mount("/webui-artifacts", StaticFiles(directory=ARTIFACT_ROOT), name="webui-artifacts")
+app = FastAPI(title=f"{config.APP_NAME} WebUI", lifespan=lifespan)
+app.mount(config.WEBUI_STATIC_MOUNT_PATH, StaticFiles(directory=STATIC_ROOT), name="webui-static")
+app.mount(config.WEBUI_ARTIFACT_MOUNT_PATH, StaticFiles(directory=ARTIFACT_ROOT), name="webui-artifacts")
 
 
 class CreateSessionRequest(BaseModel):
     title: str | None = Field(default=None)
     endpoint: str | None = Field(default=None)
     local: bool = Field(default=True)
-    headless: bool = Field(default=True)
-    max_steps_default: int = Field(default=15, ge=1, le=50)
+    headless: bool = Field(default=config.DEFAULT_HEADLESS)
+    max_steps_default: int = Field(default=config.DEFAULT_MAX_STEPS, ge=config.MIN_MAX_STEPS, le=config.MAX_MAX_STEPS)
 
 
 class SendMessageRequest(BaseModel):
     prompt: str = Field(min_length=1)
-    max_steps: int | None = Field(default=None, ge=1, le=50)
+    max_steps: int | None = Field(default=None, ge=config.MIN_MAX_STEPS, le=config.MAX_MAX_STEPS)
 
 
 class MarkSessionsInactiveRequest(BaseModel):
@@ -81,7 +85,13 @@ def index() -> FileResponse:
     return FileResponse(STATIC_ROOT / "index.html")
 
 
-@app.get("/api/status")
+@app.get(config.API_CONFIG_PATH)
+def frontend_config() -> dict:
+    # Step 1: Return the shared frontend configuration so the browser can render from one source of truth.
+    return config.get_frontend_config(default_model_endpoint=DEFAULT_MODEL_ENDPOINT)
+
+
+@app.get(config.API_STATUS_PATH)
 def webui_status() -> dict:
     # Step 1: Collect the current session inventory for the dashboard summary.
     sessions = session_manager.list_sessions()
@@ -101,7 +111,7 @@ def webui_status() -> dict:
     }
 
 
-@app.get("/api/model-service/status")
+@app.get(config.API_MODEL_SERVICE_STATUS_PATH)
 def model_service_status() -> dict:
     # Step 1: Proxy the current model-service status into the WebUI backend.
     try:
@@ -110,8 +120,8 @@ def model_service_status() -> dict:
         raise HTTPException(status_code=502, detail=f"Could not reach model service: {exc}") from exc
 
 
-@app.get("/api/model-service/logs")
-def model_service_logs(lines: int = 200) -> dict:
+@app.get(config.API_MODEL_SERVICE_LOGS_PATH)
+def model_service_logs(lines: int = config.MODEL_STATUS_LOG_LINES) -> dict:
     # Step 1: Fetch the model-service status to discover the current log file path.
     try:
         status_payload = _get_model_service_status()
@@ -123,7 +133,7 @@ def model_service_logs(lines: int = 200) -> dict:
     if not log_file:
         return {"log_file": "", "lines": [], "text": ""}
     log_path = Path(log_file)
-    log_text = _tail_text_file(log_path, max_lines=max(1, min(lines, 1000)))
+    log_text = _tail_text_file(log_path, max_lines=max(1, min(lines, config.MAX_MODEL_LOG_LINES)))
     return {
         "log_file": str(log_path),
         "text": log_text,
@@ -131,13 +141,13 @@ def model_service_logs(lines: int = 200) -> dict:
     }
 
 
-@app.get("/api/sessions")
+@app.get(config.API_SESSIONS_PATH)
 def list_sessions() -> list[dict]:
     # Step 1: Return the sidebar session summaries.
     return session_manager.list_sessions()
 
 
-@app.post("/api/sessions")
+@app.post(config.API_SESSIONS_PATH)
 def create_session(request: CreateSessionRequest) -> dict:
     # Step 1: Create a new isolated browser session for a new user conversation.
     return session_manager.create_session(
@@ -149,7 +159,7 @@ def create_session(request: CreateSessionRequest) -> dict:
     )
 
 
-@app.get("/api/sessions/{session_id}")
+@app.get(f"{config.API_SESSIONS_PATH}/{{session_id}}")
 def get_session(session_id: str) -> dict:
     # Step 1: Resolve and return the full session detail payload.
     try:
@@ -158,7 +168,7 @@ def get_session(session_id: str) -> dict:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@app.post("/api/sessions/{session_id}/messages")
+@app.post(f"{config.API_SESSIONS_PATH}/{{session_id}}/messages")
 def send_message(session_id: str, request: SendMessageRequest) -> dict:
     # Step 1: Execute a new turn against the live browser session for this user.
     try:
@@ -177,7 +187,7 @@ def send_message(session_id: str, request: SendMessageRequest) -> dict:
         raise HTTPException(status_code=500, detail=f"Unexpected session error: {exc}") from exc
 
 
-@app.post("/api/sessions/{session_id}/close")
+@app.post(f"{config.API_SESSIONS_PATH}/{{session_id}}/close")
 def close_session(session_id: str) -> dict:
     # Step 1: Close the live browser session while keeping its artifacts visible in the UI.
     try:
@@ -186,7 +196,7 @@ def close_session(session_id: str) -> dict:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@app.post("/api/admin/mark-sessions-inactive")
+@app.post(config.API_ADMIN_MARK_INACTIVE_PATH)
 def mark_sessions_inactive(request: MarkSessionsInactiveRequest) -> dict:
     # Step 1: Mark all live sessions as stale/closed for operational shutdown scenarios.
     return session_manager.mark_all_live_sessions_inactive(

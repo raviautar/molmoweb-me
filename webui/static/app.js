@@ -1,4 +1,5 @@
 const state = {
+  appConfig: null,
   selectedSessionId: null,
   selectedTurnIndex: null,
   sessions: [],
@@ -10,17 +11,27 @@ const state = {
   modelServiceLogs: null,
   galleryUrls: [],
   galleryIndex: 0,
+  sidebarOpen: false,
+  backgroundRefreshInFlight: false,
 };
 
 const elements = {
-  archivedCount: document.getElementById("archived-count"),
-  archivedSessionList: document.getElementById("archived-session-list"),
   activeJobLog: document.getElementById("active-job-log"),
-  artifactSummary: document.getElementById("artifact-summary"),
   archivedBanner: document.getElementById("archived-banner"),
   archivedBannerText: document.getElementById("archived-banner-text"),
+  archivedCount: document.getElementById("archived-count"),
+  archivedSessionList: document.getElementById("archived-session-list"),
+  artifactInfoHint: document.getElementById("artifact-info-hint"),
+  artifactInfoTitle: document.getElementById("artifact-info-title"),
+  artifactSummary: document.getElementById("artifact-summary"),
+  artifactsTitle: document.getElementById("artifacts-title"),
+  brandCopy: document.getElementById("brand-copy"),
+  brandEyebrow: document.getElementById("brand-eyebrow"),
+  brandTitle: document.getElementById("brand-title"),
   chatLog: document.getElementById("chat-log"),
   closeSessionButton: document.getElementById("close-session-button"),
+  conversationTitle: document.getElementById("conversation-title"),
+  currentSessionsSummary: document.getElementById("current-sessions-summary"),
   defaultEndpoint: document.getElementById("default-endpoint"),
   errorBanner: document.getElementById("error-banner"),
   errorBannerText: document.getElementById("error-banner-text"),
@@ -33,29 +44,52 @@ const elements = {
   latestSnapshotLink: document.getElementById("latest-snapshot-link"),
   liveCount: document.getElementById("live-count"),
   liveSessionList: document.getElementById("live-session-list"),
+  metricArchivedLabel: document.getElementById("metric-archived-label"),
+  metricEndpointLabel: document.getElementById("metric-endpoint-label"),
+  metricLiveLabel: document.getElementById("metric-live-label"),
   modelLogView: document.getElementById("model-log-view"),
   modelStatusGrid: document.getElementById("model-status-grid"),
   newChatButton: document.getElementById("new-chat-button"),
   newChatButtonTopbar: document.getElementById("new-chat-button-topbar"),
+  nextPromptLabel: document.getElementById("next-prompt-label"),
+  pastSessionsSummary: document.getElementById("past-sessions-summary"),
   promptInput: document.getElementById("prompt-input"),
   promptMaxSteps: document.getElementById("prompt-max-steps"),
+  promptMaxStepsLabel: document.getElementById("prompt-max-steps-label"),
   refreshSessionButton: document.getElementById("refresh-session-button"),
   sendPromptButton: document.getElementById("send-prompt-button"),
+  serviceHealthHint: document.getElementById("service-health-hint"),
+  serviceHealthTitle: document.getElementById("service-health-title"),
+  samplePromptExpectedAnswer: document.getElementById("sample-prompt-expected-answer"),
+  samplePromptExpectationLabel: document.getElementById("sample-prompt-expectation-label"),
+  samplePromptTitle: document.getElementById("sample-prompt-title"),
+  sessionDefaultsMeta: document.getElementById("session-defaults-meta"),
+  sessionDefaultsTitle: document.getElementById("session-defaults-title"),
   sessionEndpoint: document.getElementById("session-endpoint"),
+  sessionEndpointLabel: document.getElementById("session-endpoint-label"),
   sessionHeadless: document.getElementById("session-headless"),
+  sessionHeadlessLabel: document.getElementById("session-headless-label"),
+  sessionInfoButton: document.getElementById("session-info-button"),
   sessionMaxSteps: document.getElementById("session-max-steps"),
+  sessionMaxStepsLabel: document.getElementById("session-max-steps-label"),
   sessionMeta: document.getElementById("session-meta"),
   sessionSummary: document.getElementById("session-summary"),
+  sidebar: document.getElementById("sidebar"),
+  sidebarBackdrop: document.getElementById("sidebar-backdrop"),
+  sidebarCloseButton: document.getElementById("sidebar-close-button"),
+  sidebarToggleButton: document.getElementById("sidebar-toggle-button"),
   snapshotGrid: document.getElementById("snapshot-grid"),
-  stepLog: document.getElementById("step-log"),
+  snapshotsTitle: document.getElementById("snapshots-title"),
   toastBanner: document.getElementById("toast-banner"),
   toastBannerText: document.getElementById("toast-banner-text"),
   trajectoryLink: document.getElementById("trajectory-link"),
+  runSamplePromptButton: document.getElementById("run-sample-prompt-button"),
+  useSamplePromptButton: document.getElementById("use-sample-prompt-button"),
+  workspaceEyebrow: document.getElementById("workspace-eyebrow"),
   workspaceTitle: document.getElementById("workspace-title"),
 };
 
 let toastTimerId = null;
-
 const buttonLabels = new Map();
 
 [
@@ -64,11 +98,33 @@ const buttonLabels = new Map();
   elements.refreshSessionButton,
   elements.closeSessionButton,
   elements.sendPromptButton,
+  elements.useSamplePromptButton,
+  elements.runSamplePromptButton,
 ].forEach((button) => {
   if (button) {
-    buttonLabels.set(button, button.textContent);
+    buttonLabels.set(button, button.textContent || "");
   }
 });
+
+function getRoutes() {
+  // Step 1: Return the configured API routes after the frontend config has loaded.
+  return state.appConfig ? state.appConfig.routes : {};
+}
+
+function getLabels() {
+  // Step 1: Return the configured UI labels so render functions stay concise.
+  return state.appConfig ? state.appConfig.labels : {};
+}
+
+function getAlerts() {
+  // Step 1: Return the configured alerts so all user-facing prompts come from one source.
+  return state.appConfig ? state.appConfig.alerts : {};
+}
+
+function getEmptyStates() {
+  // Step 1: Return the configured empty-state copy used across the main panels.
+  return state.appConfig ? state.appConfig.emptyStates : {};
+}
 
 async function fetchJson(url, options = {}) {
   // Step 1: Send the HTTP request and read the body once so error parsing is safe.
@@ -95,8 +151,56 @@ async function fetchJson(url, options = {}) {
   return payload ?? {};
 }
 
+function escapeHtml(value) {
+  // Step 1: Convert arbitrary text into safe HTML for insertion into templates.
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function linkifyText(value) {
+  // Step 1: Escape the raw text first so linkification never injects untrusted HTML.
+  const escapedValue = escapeHtml(value || "");
+
+  // Step 2: Replace plain-text URLs with safe anchors while preserving surrounding text.
+  return escapedValue.replace(/(https?:\/\/[^\s<]+)/g, (rawMatch) => {
+    let urlText = rawMatch;
+    let trailingText = "";
+
+    while (/[),.;!?]$/.test(urlText)) {
+      trailingText = urlText.slice(-1) + trailingText;
+      urlText = urlText.slice(0, -1);
+    }
+
+    if (!urlText) {
+      return rawMatch;
+    }
+
+    return `<a class="inline-link" href="${urlText}" target="_blank" rel="noopener noreferrer">${urlText}</a>${trailingText}`;
+  });
+}
+
+function renderLinkedTextBlock(value, className = "") {
+  // Step 1: Render chat text in a whitespace-preserving block with clickable links.
+  const resolvedClassName = className ? ` class="${className}"` : "";
+  return `<div${resolvedClassName}>${linkifyText(value || "")}</div>`;
+}
+
+function formatDate(value) {
+  // Step 1: Return a fallback label when no timestamp is available.
+  if (!value) {
+    return "N/A";
+  }
+
+  // Step 2: Format the timestamp in the operator's local timezone.
+  return new Date(value).toLocaleString();
+}
+
 function showError(message) {
-  // Step 1: Hide the banner when there is nothing useful to show.
+  // Step 1: Hide the error banner when there is nothing useful to show.
   if (!message) {
     elements.errorBanner.classList.add("hidden");
     elements.errorBannerText.textContent = "";
@@ -212,6 +316,8 @@ function setBusy(isBusy, busyButtonKey = null, busyText = "Working") {
   elements.refreshSessionButton.disabled = isBusy || !state.selectedSessionId;
   elements.newChatButton.disabled = isBusy;
   elements.newChatButtonTopbar.disabled = isBusy;
+  elements.useSamplePromptButton.disabled = isBusy;
+  elements.runSamplePromptButton.disabled = isBusy || selectedSessionIsArchived;
   elements.promptInput.disabled = isBusy || selectedSessionIsArchived;
   elements.promptMaxSteps.disabled = isBusy || selectedSessionIsArchived;
   elements.sessionEndpoint.disabled = isBusy;
@@ -224,33 +330,100 @@ function setBusy(isBusy, busyButtonKey = null, busyText = "Working") {
   setButtonBusy(elements.refreshSessionButton, isBusy && busyButtonKey === "refresh", busyText);
   setButtonBusy(elements.newChatButton, isBusy && busyButtonKey === "newChat", busyText);
   setButtonBusy(elements.newChatButtonTopbar, isBusy && busyButtonKey === "newChatTopbar", busyText);
+  setButtonBusy(elements.useSamplePromptButton, isBusy && busyButtonKey === "sampleUse", busyText);
+  setButtonBusy(elements.runSamplePromptButton, isBusy && busyButtonKey === "sampleRun", busyText);
 }
 
-function formatDate(value) {
-  // Step 1: Return a fallback label when no timestamp is available.
-  if (!value) {
-    return "N/A";
+function setSidebarOpen(isOpen) {
+  // Step 1: Store the drawer state so the hamburger and backdrop stay synchronized.
+  state.sidebarOpen = isOpen;
+
+  // Step 2: Toggle the body class that drives the drawer animation and backdrop interactivity.
+  document.body.classList.toggle("sidebar-open", isOpen);
+}
+
+function applyFrontendConfig() {
+  // Step 1: Stop early until the backend-provided frontend config has been loaded.
+  if (!state.appConfig) {
+    return;
   }
 
-  // Step 2: Format the timestamp in the operator's local timezone.
-  return new Date(value).toLocaleString();
-}
+  const branding = state.appConfig.branding;
+  const labels = state.appConfig.labels;
+  const placeholders = state.appConfig.placeholders;
+  const defaults = state.appConfig.defaults;
+  const sample = state.appConfig.samples.hazlnutFaq;
 
-function escapeHtml(value) {
-  // Step 1: Convert arbitrary text into safe HTML for insertion into templates.
-  return String(value)
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#39;");
+  // Step 2: Apply the static copy and default field values to the DOM.
+  document.title = branding.browserTitle;
+  elements.brandEyebrow.textContent = branding.brandEyebrow;
+  elements.brandTitle.textContent = branding.brandTitle;
+  elements.brandCopy.textContent = branding.brandCopy;
+  elements.workspaceEyebrow.textContent = branding.statusEyebrow;
+  elements.workspaceTitle.textContent = branding.workspaceDefaultTitle;
+  elements.sessionDefaultsTitle.textContent = labels.sessionDefaultsTitle;
+  elements.sessionDefaultsMeta.textContent = labels.sessionDefaultsMeta;
+  elements.sessionEndpointLabel.textContent = labels.sessionEndpoint;
+  elements.sessionMaxStepsLabel.textContent = labels.sessionMaxSteps;
+  elements.sessionHeadlessLabel.textContent = labels.sessionHeadless;
+  elements.newChatButton.textContent = labels.startFresh;
+  elements.newChatButtonTopbar.textContent = labels.startFreshShort;
+  elements.currentSessionsSummary.textContent = labels.currentSessions;
+  elements.pastSessionsSummary.textContent = labels.pastSessions;
+  elements.metricLiveLabel.textContent = labels.metricLive;
+  elements.metricArchivedLabel.textContent = labels.metricArchived;
+  elements.metricEndpointLabel.textContent = labels.metricEndpoint;
+  elements.conversationTitle.textContent = labels.conversation;
+  elements.refreshSessionButton.textContent = labels.refresh;
+  elements.closeSessionButton.textContent = labels.closeSession;
+  elements.nextPromptLabel.textContent = labels.nextPrompt;
+  elements.promptMaxStepsLabel.textContent = labels.sessionMaxSteps;
+  elements.sendPromptButton.textContent = labels.runTurn;
+  elements.artifactsTitle.textContent = labels.artifacts;
+  elements.artifactInfoTitle.textContent = labels.artifactInfoTitle;
+  elements.artifactInfoHint.textContent = labels.artifactInfoHint;
+  elements.trajectoryLink.textContent = labels.openTrajectory;
+  elements.latestSnapshotLink.textContent = labels.openLatestSnapshot;
+  elements.snapshotsTitle.textContent = labels.snapshots;
+  elements.samplePromptTitle.textContent = labels.samplePromptTitle;
+  elements.samplePromptExpectationLabel.textContent = labels.samplePromptExpectation;
+  elements.samplePromptExpectedAnswer.textContent = sample.expectedAnswer;
+  elements.useSamplePromptButton.textContent = labels.samplePromptUse;
+  elements.runSamplePromptButton.textContent = labels.samplePromptRun;
+  elements.serviceHealthTitle.textContent = labels.serviceHealth;
+  elements.serviceHealthHint.textContent = labels.serviceHealthHint;
+  elements.sessionEndpoint.placeholder = placeholders.endpoint;
+  elements.promptInput.placeholder = placeholders.prompt;
+  elements.sessionMaxSteps.min = String(defaults.minSteps);
+  elements.sessionMaxSteps.max = String(defaults.maxStepsLimit);
+  elements.sessionMaxSteps.value = String(defaults.maxSteps);
+  elements.promptMaxSteps.min = String(defaults.minSteps);
+  elements.promptMaxSteps.max = String(defaults.maxStepsLimit);
+  elements.promptMaxSteps.value = String(defaults.maxSteps);
+  elements.sessionHeadless.value = defaults.headless ? "true" : "false";
+
+  // Step 3: Refresh cached button labels after the configured copy has been applied.
+  [
+    elements.newChatButton,
+    elements.newChatButtonTopbar,
+    elements.refreshSessionButton,
+    elements.closeSessionButton,
+    elements.sendPromptButton,
+    elements.useSamplePromptButton,
+    elements.runSamplePromptButton,
+  ].forEach((button) => {
+    if (button) {
+      buttonLabels.set(button, button.textContent || "");
+    }
+  });
 }
 
 function summarizeSession(session) {
   // Step 1: Build a concise summary string used throughout the header and sidebar.
-  const scope = session.live ? "Live" : "Archived";
+  const summary = state.appConfig.summary;
+  const scope = session.live ? summary.live : summary.archived;
   const runState = session.run_state ? ` • ${session.run_state}` : "";
-  return `${scope}${runState} • ${session.turn_count || 0} turns • Updated ${formatDate(session.updated_at)}`;
+  return `${scope}${runState} • ${session.turn_count || 0} ${summary.turns} • ${summary.updated} ${formatDate(session.updated_at)}`;
 }
 
 function clearSelection() {
@@ -264,19 +437,25 @@ function clearSelection() {
   renderWorkspace();
 }
 
+function applySamplePrompt() {
+  // Step 1: Copy the built-in Hazlnut FAQ prompt into the composer for quick manual runs.
+  elements.promptInput.value = state.appConfig.samples.hazlnutFaq.prompt;
+  elements.promptInput.focus();
+}
+
 function getSessionDefaults() {
-  // Step 1: Read the current operator defaults from the side panel.
+  // Step 1: Read the current operator defaults from the drawer panel.
   return {
     title: null,
     endpoint: elements.sessionEndpoint.value.trim() || null,
     local: true,
     headless: elements.sessionHeadless.value === "true",
-    max_steps_default: Number(elements.sessionMaxSteps.value || 15),
+    max_steps_default: Number(elements.sessionMaxSteps.value || state.appConfig.defaults.maxSteps),
   };
 }
 
 function renderSessionList() {
-  // Step 1: Split sessions into live and archived groups for the collapsible sidebar.
+  // Step 1: Split sessions into live and archived groups for the drawer explorer.
   const liveSessions = state.sessions.filter((session) => session.live);
   const archivedSessions = state.sessions.filter((session) => !session.live);
 
@@ -288,9 +467,11 @@ function renderSessionList() {
 function renderSessionGroup(container, sessions) {
   // Step 1: Render an empty message when the group has no sessions.
   if (sessions.length === 0) {
-    container.innerHTML = '<div class="empty-state">No sessions yet.</div>';
+    container.innerHTML = `<div class="empty-state">${escapeHtml(getEmptyStates().sessions)}</div>`;
     return;
   }
+
+  const statusPills = state.appConfig.statusPills;
 
   // Step 2: Render clickable session cards with current summary and status details.
   container.innerHTML = sessions
@@ -302,20 +483,15 @@ function renderSessionGroup(container, sessions) {
         : session.completion_status === "error"
           ? "error"
           : "";
-      const latestSnapshot = session.latest_snapshot_url
-        ? `<a class="artifact-link" href="${session.latest_snapshot_url}" target="_blank" rel="noreferrer">Latest Snapshot</a>`
-        : "";
       return `
         <article class="session-card ${sessionCardClass} ${isActive ? "active" : ""}" data-session-id="${session.session_id}">
           <div class="session-card-header">
-            <div class="status-pill">${session.live ? "Live Browser" : "Artifact Only"}</div>
+            <div class="status-pill">${session.live ? statusPills.live : statusPills.archived}</div>
             ${completionBadge}
           </div>
           <h3>${escapeHtml(session.title)}</h3>
           <div class="session-card-meta">${escapeHtml(summarizeSession(session))}</div>
-          <div class="session-card-meta">Endpoint: ${escapeHtml(session.endpoint || "")}</div>
-          <div class="session-card-meta">${escapeHtml(session.session_id)}</div>
-          ${latestSnapshot}
+          <div class="session-card-meta">${escapeHtml(session.endpoint || "")}</div>
         </article>
       `;
     })
@@ -325,18 +501,18 @@ function renderSessionGroup(container, sessions) {
   container.querySelectorAll(".session-card").forEach((card) => {
     card.addEventListener("click", async () => {
       await selectSession(card.dataset.sessionId);
+      setSidebarOpen(false);
     });
   });
 }
 
-function renderMetaGrid(session) {
-  // Step 1: Clear the grid when no session is selected.
+function renderSessionInfo(session) {
+  // Step 1: Render the info-popover empty state when no session is selected.
   if (!session) {
-    elements.sessionMeta.innerHTML = '<div class="empty-state">The next prompt will create a live session with the defaults on the left.</div>';
+    elements.sessionMeta.innerHTML = `<div class="empty-state compact-empty">${escapeHtml(getEmptyStates().sessionInfo)}</div>`;
     return;
   }
 
-  // Step 2: Render key metadata fields that matter during analysis.
   const entries = [
     ["Session ID", session.session_id],
     ["Created", formatDate(session.created_at)],
@@ -353,10 +529,11 @@ function renderMetaGrid(session) {
     ["Event Log", session.event_log_path],
   ];
 
+  // Step 2: Render the selected session metadata inside the hover card.
   elements.sessionMeta.innerHTML = entries
     .map(
       ([label, value]) => `
-        <div class="meta-item">
+        <div class="meta-item compact">
           <span class="label">${escapeHtml(label)}</span>
           <span class="value mono">${escapeHtml(value || "N/A")}</span>
         </div>
@@ -387,84 +564,204 @@ function getArchivedMessage(session) {
   return "This session is archived and cannot accept new prompts. Use Start Fresh to create a new live browser session.";
 }
 
+function renderStepThoughtMessages(turn, isSelectedTurn) {
+  // Step 1: Skip step-thought rendering when the turn has no persisted step data.
+  if (!Array.isArray(turn.steps) || turn.steps.length === 0) {
+    return "";
+  }
+
+  // Step 2: Render each step as a compact assistant-side reasoning card with collapsible details.
+  return turn.steps
+    .map((step) => {
+      const thoughtText = step.thought || step.action_text || step.message || step.error || "No structured text";
+      const summaryText = thoughtText.length > 140 ? `${thoughtText.slice(0, 140).trim()}...` : thoughtText;
+      const pageTitle = step.page_title || "Untitled page";
+      const pageUrl = step.page_url || "";
+      const actionName = step.action_name || "no-action";
+      const actionText = step.action_text || "";
+      const stepMessage = step.message || "";
+      const stepError = step.error || "";
+      return `
+        <div class="chat-row assistant-row thought-row" data-turn-index="${turn.turn_index}">
+          <article class="chat-card assistant thought-card ${isSelectedTurn ? "active" : ""}">
+            <details class="thought-disclosure">
+              <summary>
+                <span class="thought-summary-eyebrow">Thought ${escapeHtml(String(step.step_index))} • ${escapeHtml(actionName)}</span>
+                <span class="thought-summary-text">${escapeHtml(summaryText)}</span>
+              </summary>
+              <div class="thought-body">
+                <div class="chat-step-meta">${escapeHtml(pageTitle)}</div>
+                <div class="chat-step-meta mono">${escapeHtml(pageUrl)}</div>
+                ${renderLinkedTextBlock(thoughtText, "thought-paragraph")}
+                ${actionText ? renderLinkedTextBlock(actionText, "thought-detail mono") : ""}
+                ${stepMessage ? renderLinkedTextBlock(stepMessage, "thought-detail") : ""}
+                ${stepError ? renderLinkedTextBlock(stepError, "thought-detail error-text") : ""}
+              </div>
+            </details>
+          </article>
+        </div>
+      `;
+    })
+    .join("");
+}
+
+function getLiveTurn(session) {
+  // Step 1: Return the in-memory live turn only while the session is actively running.
+  if (!session || !session.live_turn || session.run_state !== "running") {
+    return null;
+  }
+
+  return session.live_turn;
+}
+
+function getDisplayTurns(session) {
+  // Step 1: Start from the persisted turns already saved for the selected session.
+  const persistedTurns = Array.isArray(session && session.turns) ? session.turns : [];
+  const liveTurn = getLiveTurn(session);
+
+  // Step 2: Drop the matching running turn from disk when an in-memory live turn is available.
+  const turns = liveTurn
+    ? persistedTurns.filter((turn) => !(turn.turn_index === liveTurn.turn_index && turn.completion_status === "running"))
+    : persistedTurns;
+
+  return { turns, liveTurn };
+}
+
+function getTurnByIndex(session, turnIndex) {
+  // Step 1: Search the persisted and in-memory turn sources using one shared helper.
+  const { turns, liveTurn } = getDisplayTurns(session);
+  const persistedTurn = turns.find((candidate) => candidate.turn_index === turnIndex) || null;
+  if (persistedTurn) {
+    return persistedTurn;
+  }
+
+  // Step 2: Fall back to the live in-progress turn when it matches the requested turn index.
+  if (liveTurn && liveTurn.turn_index === turnIndex) {
+    return liveTurn;
+  }
+
+  return null;
+}
+
 function renderChat(session) {
   // Step 1: Show the empty state until a session is selected.
   if (!session) {
     elements.chatLog.className = "chat-log empty-state";
-    elements.chatLog.textContent = "Send a prompt to start a persistent browser session. The first completed turn will generate the session title automatically.";
+    elements.chatLog.textContent = getEmptyStates().chatNoSelection;
     return;
   }
 
-  // Step 2: Render each turn as paired user and assistant cards.
+  const { turns, liveTurn } = getDisplayTurns(session);
   const cards = [];
-  session.turns.forEach((turn) => {
+
+  // Step 2: Render each turn as a user card, streamed assistant thought cards, and a final assistant answer card.
+  turns.forEach((turn) => {
     const isSelectedTurn = state.selectedTurnIndex === turn.turn_index;
     const completionStatus = turn.completion_status || "";
     const assistantMetaParts = [turn.final_page_title || "No page title", turn.final_page_url || ""];
     if (completionStatus) {
-      assistantMetaParts.push(completionStatus.replaceAll("_", " "));
+      assistantMetaParts.push(formatCompletionStatus(completionStatus));
     }
     cards.push(`
-      <article class="chat-card user ${isSelectedTurn ? "active" : ""}" data-turn-index="${turn.turn_index}">
-        <div class="chat-card-header">
-          <div>
-            <div class="chat-card-meta">Turn ${turn.turn_index} • ${escapeHtml(formatDate(turn.started_at))}</div>
-            <h3>User</h3>
+      <div class="chat-row user-row" data-turn-index="${turn.turn_index}">
+        <article class="chat-card user ${isSelectedTurn ? "active" : ""}">
+          <div class="chat-card-header">
+            <div>
+              <div class="chat-card-meta">Turn ${turn.turn_index} • ${escapeHtml(formatDate(turn.started_at))}</div>
+              <h3>User</h3>
+            </div>
+            <button class="copy-prompt-button" type="button" data-copy-prompt="${escapeHtml(turn.prompt)}">Copy Prompt</button>
           </div>
-          <button class="copy-prompt-button" type="button" data-copy-prompt="${escapeHtml(turn.prompt)}">Copy Prompt</button>
-        </div>
-        <pre>${escapeHtml(turn.prompt)}</pre>
-      </article>
+          ${renderLinkedTextBlock(turn.prompt, "chat-text-block")}
+        </article>
+      </div>
     `);
+    cards.push(renderStepThoughtMessages(turn, isSelectedTurn));
     cards.push(`
-      <article class="chat-card assistant ${completionStatus === "max_steps" ? "max-steps" : ""} ${completionStatus === "error" ? "error" : ""} ${isSelectedTurn ? "active" : ""}" data-turn-index="${turn.turn_index}">
-        <div class="chat-card-header">
-          <div>
-            <div class="chat-card-meta">${escapeHtml(assistantMetaParts.filter(Boolean).join(" • "))}</div>
-            <h3>Assistant</h3>
+      <div class="chat-row assistant-row" data-turn-index="${turn.turn_index}">
+        <article class="chat-card assistant ${completionStatus === "max_steps" ? "max-steps" : ""} ${completionStatus === "error" ? "error" : ""} ${isSelectedTurn ? "active" : ""}">
+          <div class="chat-card-header">
+            <div>
+              <div class="chat-card-meta">${escapeHtml(assistantMetaParts.filter(Boolean).join(" • "))}</div>
+              <h3>Assistant</h3>
+            </div>
+            ${renderCompletionBadge(completionStatus)}
           </div>
-          ${renderCompletionBadge(completionStatus)}
-        </div>
-        <pre>${escapeHtml(turn.assistant_text || turn.final_error || "No textual output")}</pre>
-      </article>
+          ${renderLinkedTextBlock(turn.assistant_text || turn.final_error || "No textual output", "chat-text-block")}
+        </article>
+      </div>
     `);
   });
 
-  if ((session.run_state || "") === "running") {
+  // Step 3: Render the in-progress live turn after completed turns so thoughts stream during execution.
+  if (liveTurn) {
+    const isSelectedTurn = state.selectedTurnIndex === liveTurn.turn_index;
     cards.push(`
-      <article class="chat-card assistant active">
-        <div class="chat-card-meta">Running • turn ${escapeHtml(String(session.current_turn_index || 0))} • step ${escapeHtml(String(session.current_step_index || 0))}</div>
-        <h3>Assistant</h3>
-        <pre>${escapeHtml(session.current_prompt || "Browser session is working...")}</pre>
-      </article>
+      <div class="chat-row user-row" data-turn-index="${liveTurn.turn_index}">
+        <article class="chat-card user ${isSelectedTurn ? "active" : ""}">
+          <div class="chat-card-header">
+            <div>
+              <div class="chat-card-meta">Turn ${liveTurn.turn_index} • ${escapeHtml(formatDate(liveTurn.started_at))}</div>
+              <h3>User</h3>
+            </div>
+            <button class="copy-prompt-button" type="button" data-copy-prompt="${escapeHtml(liveTurn.prompt || "")}">Copy Prompt</button>
+          </div>
+          ${renderLinkedTextBlock(liveTurn.prompt || "", "chat-text-block")}
+        </article>
+      </div>
+    `);
+    cards.push(renderStepThoughtMessages(liveTurn, isSelectedTurn));
+    cards.push(`
+      <div class="chat-row assistant-row" data-turn-index="${liveTurn.turn_index}">
+        <article class="chat-card assistant active running-card ${isSelectedTurn ? "active" : ""}">
+          <div class="chat-card-header">
+            <div>
+              <div class="chat-card-meta">Running • turn ${escapeHtml(String(liveTurn.turn_index || 0))} • step ${escapeHtml(String(liveTurn.step_count || 0))}/${escapeHtml(String(liveTurn.max_steps || session.max_steps_default || state.appConfig.defaults.maxSteps))}</div>
+              <h3>Assistant</h3>
+            </div>
+            ${renderCompletionBadge("running")}
+          </div>
+          ${renderLinkedTextBlock(liveTurn.assistant_text || session.current_prompt || "Browser session is working...", "chat-text-block")}
+        </article>
+      </div>
+    `);
+  } else if ((session.run_state || "") === "running") {
+    cards.push(`
+      <div class="chat-row assistant-row">
+        <article class="chat-card assistant active running-card">
+          <div class="chat-card-meta">Running • turn ${escapeHtml(String(session.current_turn_index || 0))} • step ${escapeHtml(String(session.current_step_index || 0))}</div>
+          <h3>Assistant</h3>
+          ${renderLinkedTextBlock(session.current_prompt || "Browser session is working...", "chat-text-block")}
+        </article>
+      </div>
     `);
   }
 
   elements.chatLog.className = "chat-log";
   elements.chatLog.innerHTML = cards.join("");
 
-  // Step 3: Attach click handlers so any turn card updates the artifact inspector.
-  elements.chatLog.querySelectorAll(".chat-card").forEach((card) => {
-    card.addEventListener("click", () => {
-      if (!card.dataset.turnIndex) {
+  // Step 4: Attach click handlers so any turn card updates the artifact inspector.
+  elements.chatLog.querySelectorAll(".chat-row").forEach((row) => {
+    row.addEventListener("click", () => {
+      if (!row.dataset.turnIndex) {
         return;
       }
-      state.selectedTurnIndex = Number(card.dataset.turnIndex);
+      state.selectedTurnIndex = Number(row.dataset.turnIndex);
       renderInspector(session);
       renderChat(session);
     });
   });
 
-  // Step 4: Attach copy handlers to user prompt cards.
+  // Step 5: Attach copy handlers to user prompt cards.
   elements.chatLog.querySelectorAll(".copy-prompt-button").forEach((button) => {
     button.addEventListener("click", async (event) => {
       event.preventDefault();
       event.stopPropagation();
       try {
         await copyTextToClipboard(button.dataset.copyPrompt || "");
-        showToast("Prompt copied to clipboard.");
+        showToast(getAlerts().copySuccess);
       } catch (_error) {
-        showError("Could not copy the prompt to the clipboard.");
+        showError(getAlerts().copyFailure);
       }
     });
   });
@@ -484,38 +781,50 @@ function setArtifactLink(element, url) {
 }
 
 function renderInspector(session) {
-  // Step 1: Show the empty state until a session is selected.
+  // Step 1: Render the inspector empty state until a session is selected.
   if (!session) {
     state.galleryUrls = [];
+    elements.artifactSummary.textContent = getEmptyStates().artifacts;
     elements.snapshotGrid.className = "snapshot-grid empty-state";
-    elements.snapshotGrid.textContent = "Select a turn to inspect saved step snapshots.";
-    elements.stepLog.className = "step-log empty-state";
-    elements.stepLog.textContent = "Step summaries will appear here.";
-    elements.artifactSummary.textContent = "Snapshots and trajectory outputs for the selected turn.";
+    elements.snapshotGrid.textContent = getEmptyStates().snapshots;
     setArtifactLink(elements.trajectoryLink, "");
     setArtifactLink(elements.latestSnapshotLink, "");
+    renderSessionInfo(null);
     return;
   }
 
-  // Step 2: Select the active turn, defaulting to the most recent one.
-  if (!state.selectedTurnIndex && session.turns.length > 0) {
-    state.selectedTurnIndex = session.turns[session.turns.length - 1].turn_index;
-  }
-  const turn = session.turns.find((candidate) => candidate.turn_index === state.selectedTurnIndex) || null;
+  const { turns, liveTurn } = getDisplayTurns(session);
 
-  // Step 3: Render the inspector header and artifact links.
+  if (!state.selectedTurnIndex) {
+    if (liveTurn) {
+      state.selectedTurnIndex = liveTurn.turn_index;
+    } else if (turns.length > 0) {
+      state.selectedTurnIndex = turns[turns.length - 1].turn_index;
+    }
+  }
+  const turn = getTurnByIndex(session, state.selectedTurnIndex) || null;
+
+  // Step 2: Render the selected session metadata inside the info popover.
+  renderSessionInfo(session);
+
+  // Step 3: Render the inspector summary and artifact links.
   const completionSuffix = turn && turn.completion_status ? ` • ${turn.completion_status.replaceAll("_", " ")}` : "";
   elements.artifactSummary.textContent = turn
     ? `Turn ${turn.turn_index} • ${turn.step_count} steps${completionSuffix} • ${turn.final_page_title || "No final page title"}`
     : "No turns have been run for this session yet.";
   setArtifactLink(elements.trajectoryLink, turn ? turn.trajectory_html_url : "");
-  setArtifactLink(elements.latestSnapshotLink, session.latest_snapshot_url || "");
+  setArtifactLink(
+    elements.latestSnapshotLink,
+    turn && Array.isArray(turn.snapshot_urls) && turn.snapshot_urls.length > 0
+      ? turn.snapshot_urls[turn.snapshot_urls.length - 1]
+      : session.latest_snapshot_url || "",
+  );
 
-  // Step 4: Render the snapshot gallery for the selected turn.
+  // Step 4: Render the snapshot rail for the selected turn.
   if (!turn || !turn.snapshot_urls || turn.snapshot_urls.length === 0) {
     state.galleryUrls = [];
     elements.snapshotGrid.className = "snapshot-grid empty-state";
-    elements.snapshotGrid.textContent = "No snapshots have been saved for the selected turn.";
+    elements.snapshotGrid.textContent = getEmptyStates().noSnapshots;
   } else {
     state.galleryUrls = turn.snapshot_urls.slice();
     elements.snapshotGrid.className = "snapshot-grid";
@@ -537,54 +846,35 @@ function renderInspector(session) {
       });
     });
   }
-
-  // Step 5: Render the step-by-step textual summary log.
-  if (!turn || !turn.steps || turn.steps.length === 0) {
-    elements.stepLog.className = "step-log empty-state";
-    elements.stepLog.textContent = "Step summaries will appear here.";
-  } else {
-    elements.stepLog.className = "step-log";
-    elements.stepLog.innerHTML = turn.steps
-      .map(
-        (step) => `
-          <article class="step-card">
-            <div class="chat-card-meta">Step ${step.step_index} • ${escapeHtml(step.action_name || "no-action")}</div>
-            <h4>${escapeHtml(step.page_title || "Untitled page")}</h4>
-            <p>${escapeHtml(step.page_url || "")}</p>
-            <pre>${escapeHtml(step.thought || step.action_text || step.message || step.error || "No structured text")}</pre>
-          </article>
-        `,
-      )
-      .join("");
-  }
 }
 
 function renderModelService() {
   // Step 1: Render an empty state until the main model-service payload has been loaded.
   if (!state.modelServiceStatus) {
-    elements.modelStatusGrid.innerHTML = '<div class="empty-state">Main service status will appear here.</div>';
-    elements.activeJobLog.className = 'step-log empty-state';
-    elements.activeJobLog.textContent = 'Active model-service jobs will appear here.';
-    elements.modelLogView.className = 'log-view empty-state';
-    elements.modelLogView.textContent = 'Main service logs will appear here.';
+    elements.modelStatusGrid.innerHTML = `<div class="empty-state compact-empty">${escapeHtml(getEmptyStates().modelStatus)}</div>`;
+    elements.activeJobLog.className = "step-log empty-state";
+    elements.activeJobLog.textContent = getEmptyStates().modelJobs;
+    elements.modelLogView.className = "log-view empty-state";
+    elements.modelLogView.textContent = getEmptyStates().modelLogs;
     return;
   }
 
-  // Step 2: Render key model-service metadata and the active job count.
   const status = state.modelServiceStatus;
+
+  // Step 2: Render key model-service metadata and the active job count.
   const metadataEntries = [
-    ['Service PID', String(status.pid || 'N/A')],
-    ['Service Log', status.log_file || 'N/A'],
-    ['Checkpoint', status.checkpoint || 'N/A'],
-    ['Predictor Type', status.predictor_type || 'N/A'],
-    ['Queue Size', `${status.predictor_queue_size}/${status.predictor_queue_capacity}`],
-    ['Active Jobs', String(status.active_job_count || 0)],
+    ["Service PID", String(status.pid || "N/A")],
+    ["Service Log", status.log_file || "N/A"],
+    ["Checkpoint", status.checkpoint || "N/A"],
+    ["Predictor Type", status.predictor_type || "N/A"],
+    ["Queue Size", `${status.predictor_queue_size}/${status.predictor_queue_capacity}`],
+    ["Active Jobs", String(status.active_job_count || 0)],
   ];
   const gpuEntries = Array.isArray(status.gpu_status)
     ? status.gpu_status.map((gpu) => {
         const total = Number(gpu.memory_total_mb || 0);
         const used = Number(gpu.memory_used_mb || 0);
-        const percent = total > 0 ? ((used / total) * 100).toFixed(1) : '0.0';
+        const percent = total > 0 ? ((used / total) * 100).toFixed(1) : "0.0";
         return [`GPU ${gpu.device_index}`, `${percent}% (${used}/${total} MB)`];
       })
     : [];
@@ -592,65 +882,71 @@ function renderModelService() {
     .concat(gpuEntries)
     .map(
       ([label, value]) => `
-        <div class="meta-item">
+        <div class="meta-item compact">
           <span class="label">${escapeHtml(label)}</span>
           <span class="value mono">${escapeHtml(value)}</span>
         </div>
       `,
     )
-    .join('');
+    .join("");
 
   // Step 3: Render active jobs when present, otherwise show the most recent tracked jobs.
   const activeJobs = Array.isArray(status.active_jobs) ? status.active_jobs : [];
   const trackedJobs = Array.isArray(status.tracked_jobs) ? status.tracked_jobs : [];
   const jobsToRender = activeJobs.length > 0 ? activeJobs : trackedJobs.slice(0, 5);
   if (jobsToRender.length === 0) {
-    elements.activeJobLog.className = 'step-log empty-state';
-    elements.activeJobLog.textContent = 'No tracked model-service jobs yet.';
+    elements.activeJobLog.className = "step-log empty-state";
+    elements.activeJobLog.textContent = getEmptyStates().modelJobsNone;
   } else {
-    elements.activeJobLog.className = 'step-log';
+    elements.activeJobLog.className = "step-log";
     elements.activeJobLog.innerHTML = jobsToRender
       .map(
         (job) => `
-          <article class="step-card">
-            <div class="chat-card-meta">${escapeHtml(job.state || 'unknown')} • turn ${escapeHtml(String(job.turn_index || 0))} • step ${escapeHtml(String(job.step_index || 0))}/${escapeHtml(String(job.max_steps || 0))}</div>
-            <h4>${escapeHtml(job.session_title || job.session_id || job.job_key || 'anonymous request')}</h4>
-            <p>${escapeHtml(job.page_title || '')} • ${escapeHtml(job.page_url || '')}</p>
-            <pre>${escapeHtml(job.query || job.last_error || '')}</pre>
+          <article class="step-card compact-step-card">
+            <div class="chat-card-meta">${escapeHtml(job.state || "unknown")} • turn ${escapeHtml(String(job.turn_index || 0))} • step ${escapeHtml(String(job.step_index || 0))}/${escapeHtml(String(job.max_steps || 0))}</div>
+            <h4>${escapeHtml(job.session_title || job.session_id || job.job_key || "anonymous request")}</h4>
+            <p>${escapeHtml(job.page_title || "")}</p>
+            <pre>${escapeHtml(job.query || job.last_error || "")}</pre>
           </article>
         `,
       )
-      .join('');
+      .join("");
   }
 
-  // Step 4: Render the tail of the model-service log inside the inspector.
-  const logText = state.modelServiceLogs && state.modelServiceLogs.text ? state.modelServiceLogs.text : '';
-  elements.modelLogView.className = 'log-view';
-  elements.modelLogView.textContent = logText || 'Main service log file is empty.';
+  // Step 4: Render the tail of the model-service log inside the collapsed service details panel.
+  const logText = state.modelServiceLogs && state.modelServiceLogs.text ? state.modelServiceLogs.text : "";
+  elements.modelLogView.className = "log-view";
+  elements.modelLogView.textContent = logText || getEmptyStates().modelLogsEmpty;
 }
 
 function renderWorkspace() {
   // Step 1: Update the top-level workspace labels and action state.
   const session = state.sessionDetail;
-  elements.workspaceTitle.textContent = session ? session.title : "Main Chat";
-  elements.sessionSummary.textContent = session ? summarizeSession(session) : "No live session selected yet. The first prompt creates one automatically.";
+  elements.workspaceTitle.textContent = session ? session.title : state.appConfig.branding.workspaceDefaultTitle;
+  elements.sessionSummary.textContent = session ? summarizeSession(session) : state.appConfig.branding.workspaceDefaultSummary;
   showArchivedMessage(getArchivedMessage(session));
-  renderMetaGrid(session);
   renderChat(session);
   renderInspector(session);
   renderModelService();
   setBusy(state.isBusy, state.busyButtonKey, state.busyButtonText);
 }
 
+async function loadFrontendConfig() {
+  // Step 1: Fetch the backend-provided frontend config and apply it to the static DOM.
+  state.appConfig = await fetchJson("/api/config");
+  applyFrontendConfig();
+}
+
 async function loadModelServiceData() {
   // Step 1: Fetch the main model-service status and its current log tail through the WebUI backend.
-  state.modelServiceStatus = await fetchJson('/api/model-service/status');
-  state.modelServiceLogs = await fetchJson('/api/model-service/logs?lines=200');
+  const routes = getRoutes();
+  state.modelServiceStatus = await fetchJson(routes.modelServiceStatus);
+  state.modelServiceLogs = await fetchJson(`${routes.modelServiceLogs}?lines=${state.appConfig.defaults.modelLogLines}`);
 }
 
 async function loadAppStatus() {
   // Step 1: Fetch the aggregate web UI status from the backend.
-  const payload = await fetchJson("/api/status");
+  const payload = await fetchJson(getRoutes().status);
 
   // Step 2: Update the summary cards in the workspace header.
   elements.liveCount.textContent = String(payload.live_session_count);
@@ -662,10 +958,10 @@ async function loadAppStatus() {
 }
 
 async function loadSessions() {
-  // Step 1: Fetch the sidebar session summaries from the backend.
-  state.sessions = await fetchJson("/api/sessions");
+  // Step 1: Fetch the drawer session summaries from the backend.
+  state.sessions = await fetchJson(getRoutes().sessions);
 
-  // Step 2: Re-render the sidebar with the latest session inventory.
+  // Step 2: Re-render the drawer with the latest session inventory.
   renderSessionList();
 }
 
@@ -675,14 +971,17 @@ async function selectSession(sessionId) {
   state.selectedTurnIndex = null;
 
   // Step 2: Fetch the full session detail payload for the workspace view.
-  state.sessionDetail = await fetchJson(`/api/sessions/${sessionId}`);
+  state.sessionDetail = await fetchJson(`${getRoutes().sessions}/${sessionId}`);
 
   // Step 3: Default the inspector to the most recent turn when one exists.
-  if (state.sessionDetail.turns.length > 0) {
-    state.selectedTurnIndex = state.sessionDetail.turns[state.sessionDetail.turns.length - 1].turn_index;
+  const { turns, liveTurn } = getDisplayTurns(state.sessionDetail);
+  if (liveTurn) {
+    state.selectedTurnIndex = liveTurn.turn_index;
+  } else if (turns.length > 0) {
+    state.selectedTurnIndex = turns[turns.length - 1].turn_index;
   }
 
-  // Step 4: Re-render the entire workspace and sidebar highlight state.
+  // Step 4: Re-render the entire workspace and drawer highlight state.
   renderSessionList();
   renderWorkspace();
 }
@@ -694,13 +993,13 @@ async function ensureLiveSession() {
   }
 
   // Step 2: Create a fresh live session using the operator defaults.
-  const session = await fetchJson("/api/sessions", {
+  const session = await fetchJson(getRoutes().sessions, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(getSessionDefaults()),
   });
 
-  // Step 3: Refresh the sidebar inventory and select the newly created session.
+  // Step 3: Refresh the drawer inventory and select the newly created session.
   await loadAppStatus();
   await loadSessions();
   await selectSession(session.session_id);
@@ -714,38 +1013,78 @@ async function sendPrompt() {
     return;
   }
 
-  // Step 2: Create a live session on demand when none is currently selected.
   showError("");
   setBusy(true, "send", "Running");
   try {
+    // Step 2: Prevent new work from being sent to an archived session.
     if (state.selectedSessionId && state.sessionDetail && !state.sessionDetail.live) {
-      throw new Error("The selected session is archived. Click Start Fresh to begin a new live chat.");
+      throw new Error(getAlerts().archivedSelection);
     }
+
+    // Step 3: Create a live session on demand when none is currently selected.
     const sessionId = await ensureLiveSession();
-    state.sessionDetail = await fetchJson(`/api/sessions/${sessionId}/messages`, {
+    const optimisticTurnIndex = Number(state.sessionDetail && state.sessionDetail.turn_count ? state.sessionDetail.turn_count : 0) + 1;
+
+    // Step 4: Seed an optimistic live-turn record so the chat switches to the running turn immediately.
+    if (state.sessionDetail) {
+      state.sessionDetail.run_state = "running";
+      state.sessionDetail.current_turn_index = optimisticTurnIndex;
+      state.sessionDetail.current_step_index = 0;
+      state.sessionDetail.current_prompt = prompt;
+      state.sessionDetail.live_turn = {
+        turn_index: optimisticTurnIndex,
+        prompt,
+        assistant_text: "Run in progress...",
+        completion_status: "running",
+        started_at: new Date().toISOString(),
+        completed_at: "",
+        max_steps: Number(elements.promptMaxSteps.value || state.appConfig.defaults.maxSteps),
+        trajectory_html_url: "",
+        trajectory_html_path: "",
+        snapshot_urls: [],
+        snapshot_paths: [],
+        step_count: 0,
+        steps: [],
+        final_page_url: "",
+        final_page_title: "",
+        final_error: "",
+      };
+      state.selectedTurnIndex = optimisticTurnIndex;
+      renderWorkspace();
+    }
+
+    // Step 5: Dispatch the actual prompt to the backend and replace the optimistic turn with the canonical response.
+    state.sessionDetail = await fetchJson(`${getRoutes().sessions}/${sessionId}/messages`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         prompt,
-        max_steps: Number(elements.promptMaxSteps.value || 15),
+        max_steps: Number(elements.promptMaxSteps.value || state.appConfig.defaults.maxSteps),
       }),
     });
     elements.promptInput.value = "";
-    if (state.sessionDetail.turns.length > 0) {
-      state.selectedTurnIndex = state.sessionDetail.turns[state.sessionDetail.turns.length - 1].turn_index;
+    const { turns, liveTurn } = getDisplayTurns(state.sessionDetail);
+    if (liveTurn) {
+      state.selectedTurnIndex = liveTurn.turn_index;
+    } else if (turns.length > 0) {
+      state.selectedTurnIndex = turns[turns.length - 1].turn_index;
     }
     await loadAppStatus();
     await loadModelServiceData();
     await loadSessions();
     renderWorkspace();
-    if (state.sessionDetail && state.sessionDetail.turns.length > 0) {
-      const latestTurn = state.sessionDetail.turns[state.sessionDetail.turns.length - 1];
-      const completionStatus = latestTurn.completion_status || "answered";
+    if (state.sessionDetail) {
+      const { turns: completedTurns } = getDisplayTurns(state.sessionDetail);
+      const latestTurn = completedTurns.length > 0 ? completedTurns[completedTurns.length - 1] : null;
+      if (latestTurn) {
+      const completionStatus = latestTurn.completion_status || state.appConfig.completion.defaultFinished;
       showToast(`Run finished: ${formatCompletionStatus(completionStatus)}.`);
+      }
     }
   } catch (error) {
+    // Step 4: Surface a readable failure and refresh whichever state can still be loaded.
     showError(error.message || "The browser session failed.");
-    showToast("Run failed.");
+    showToast(getAlerts().runFailure);
     await loadAppStatus();
     await loadModelServiceData();
     if (state.selectedSessionId) {
@@ -764,45 +1103,23 @@ async function closeSelectedSession() {
     return;
   }
 
-  // Step 2: Ask the backend to close the live browser session while preserving artifacts.
   showError("");
   setBusy(true, "close", "Closing");
   try {
-    state.sessionDetail = await fetchJson(`/api/sessions/${state.selectedSessionId}/close`, {
+    // Step 2: Ask the backend to close the live browser session while preserving artifacts.
+    state.sessionDetail = await fetchJson(`${getRoutes().sessions}/${state.selectedSessionId}/close`, {
       method: "POST",
     });
     await loadAppStatus();
     await loadModelServiceData();
     await loadSessions();
     renderWorkspace();
-    showToast("Session closed.");
+    showToast(getAlerts().sessionClosed);
   } catch (error) {
     showError(error.message || "Could not close the session.");
   } finally {
     setBusy(false);
   }
-}
-
-async function refreshActiveWorkspace() {
-  // Step 1: Keep the status cards and session lists current.
-  await loadAppStatus();
-  await loadModelServiceData();
-  await loadSessions();
-
-  // Step 2: Refresh the selected session detail when one is active.
-  if (state.selectedSessionId) {
-    const selectedTurnIndex = state.selectedTurnIndex;
-    state.sessionDetail = await fetchJson(`/api/sessions/${state.selectedSessionId}`);
-    if (selectedTurnIndex && state.sessionDetail.turns.some((turn) => turn.turn_index === selectedTurnIndex)) {
-      state.selectedTurnIndex = selectedTurnIndex;
-    } else if (state.sessionDetail.turns.length > 0) {
-      state.selectedTurnIndex = state.sessionDetail.turns[state.sessionDetail.turns.length - 1].turn_index;
-    }
-  }
-
-  // Step 3: Re-render the current workspace with the latest backend state.
-  renderSessionList();
-  renderWorkspace();
 }
 
 async function refreshSelectedSession() {
@@ -811,10 +1128,10 @@ async function refreshSelectedSession() {
     return;
   }
 
-  // Step 2: Reload the selected session detail and refresh the workspace.
   showError("");
   setBusy(true, "refresh", "Refreshing");
   try {
+    // Step 2: Reload the selected session detail and refresh the workspace.
     await loadAppStatus();
     await loadSessions();
     await selectSession(state.selectedSessionId);
@@ -824,6 +1141,53 @@ async function refreshSelectedSession() {
   } finally {
     setBusy(false);
   }
+}
+
+async function refreshActiveWorkspace() {
+  // Step 1: Avoid overlapping refresh cycles while the UI is already polling the backend.
+  if (state.backgroundRefreshInFlight || !state.appConfig) {
+    return;
+  }
+
+  state.backgroundRefreshInFlight = true;
+  try {
+    // Step 2: Refresh the shared app status, service status, and session inventory.
+    await loadAppStatus();
+    await loadModelServiceData();
+    await loadSessions();
+
+    // Step 3: Refresh the selected session detail while preserving the selected turn when possible.
+    if (state.selectedSessionId) {
+      const selectedTurnIndex = state.selectedTurnIndex;
+      state.sessionDetail = await fetchJson(`${getRoutes().sessions}/${state.selectedSessionId}`);
+      if (selectedTurnIndex && getTurnByIndex(state.sessionDetail, selectedTurnIndex)) {
+        state.selectedTurnIndex = selectedTurnIndex;
+      } else {
+        const { turns, liveTurn } = getDisplayTurns(state.sessionDetail);
+        if (liveTurn) {
+          state.selectedTurnIndex = liveTurn.turn_index;
+        } else if (turns.length > 0) {
+          state.selectedTurnIndex = turns[turns.length - 1].turn_index;
+        }
+      }
+    }
+
+    // Step 4: Re-render the workspace with the refreshed state.
+    renderWorkspace();
+    renderSessionList();
+  } catch (_error) {
+    // Step 5: Keep background polling silent so transient failures do not interrupt active runs.
+  } finally {
+    state.backgroundRefreshInFlight = false;
+  }
+}
+
+async function runSamplePrompt() {
+  // Step 1: Populate the composer with the built-in sample prompt before dispatching it.
+  applySamplePrompt();
+
+  // Step 2: Send the sample prompt through the normal session workflow.
+  await sendPrompt();
 }
 
 function renderGallery() {
@@ -872,10 +1236,29 @@ function moveGallery(delta) {
   renderGallery();
 }
 
+function getBeforeUnloadMessage() {
+  // Step 1: Wait until the frontend config has loaded before attempting to show an unload prompt.
+  if (!state.appConfig) {
+    return "";
+  }
+
+  const hasRunningWork = (state.isBusy && state.busyButtonKey === "send")
+    || Boolean(state.sessionDetail && state.sessionDetail.live && state.sessionDetail.run_state === "running")
+    || state.sessions.some((session) => session.live && session.run_state === "running");
+
+  // Step 2: Return the running or idle confirmation message requested for tab refresh and close actions.
+  return hasRunningWork ? getAlerts().runningUnload : getAlerts().idleUnload;
+}
+
 async function initialize() {
-  // Step 1: Attach all user interaction handlers to the static controls.
+  // Step 1: Attach all static interaction handlers before the first data load.
+  elements.sidebarToggleButton.addEventListener("click", () => setSidebarOpen(true));
+  elements.sidebarCloseButton.addEventListener("click", () => setSidebarOpen(false));
+  elements.sidebarBackdrop.addEventListener("click", () => setSidebarOpen(false));
   elements.newChatButton.addEventListener("click", clearSelection);
   elements.newChatButtonTopbar.addEventListener("click", clearSelection);
+  elements.useSamplePromptButton.addEventListener("click", applySamplePrompt);
+  elements.runSamplePromptButton.addEventListener("click", runSamplePrompt);
   elements.sendPromptButton.addEventListener("click", sendPrompt);
   elements.closeSessionButton.addEventListener("click", closeSelectedSession);
   elements.refreshSessionButton.addEventListener("click", refreshSelectedSession);
@@ -893,39 +1276,50 @@ async function initialize() {
       await sendPrompt();
     }
   });
-  document.addEventListener("keydown", (event) => {
-    if (elements.galleryModal.classList.contains("hidden")) {
+  window.addEventListener("beforeunload", (event) => {
+    const message = getBeforeUnloadMessage();
+    if (!message) {
       return;
     }
+    event.preventDefault();
+    event.returnValue = message;
+    return message;
+  });
+  document.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
-      closeGallery();
+      if (!elements.galleryModal.classList.contains("hidden")) {
+        closeGallery();
+        return;
+      }
+      if (state.sidebarOpen) {
+        setSidebarOpen(false);
+      }
+      return;
     }
-    if (event.key === "ArrowLeft") {
+    if (!elements.galleryModal.classList.contains("hidden") && event.key === "ArrowLeft") {
       moveGallery(-1);
+      return;
     }
-    if (event.key === "ArrowRight") {
+    if (!elements.galleryModal.classList.contains("hidden") && event.key === "ArrowRight") {
       moveGallery(1);
     }
   });
 
-  // Step 2: Load the initial backend status and session inventory.
+  // Step 2: Load all initial backend state required to render the application.
+  await loadFrontendConfig();
   await loadAppStatus();
   await loadModelServiceData();
   await loadSessions();
+
+  // Step 3: Render the initial workspace using the loaded config and server data.
   renderWorkspace();
 
-  // Step 3: Keep the sidebar counts fresh while preserving the current selection.
-  window.setInterval(async () => {
-    try {
-      await refreshActiveWorkspace();
-    } catch (error) {
-      showError(error.message || "Background refresh failed.");
-    }
-  }, 1500);
+  // Step 4: Start background polling so running turns update live in the WebUI.
+  window.setInterval(() => {
+    refreshActiveWorkspace();
+  }, state.appConfig.defaults.refreshIntervalMs);
 }
 
 initialize().catch((error) => {
-  // Step 1: Surface bootstrap errors in the main workspace when initialization fails.
-  elements.chatLog.className = "chat-log empty-state";
-  elements.chatLog.textContent = `Initialization failed: ${error.message}`;
+  showError(error.message || "Could not initialize the session console.");
 });

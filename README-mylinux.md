@@ -1,8 +1,13 @@
+<p align="center">
+  <img src="assets/logo.png" alt="MolmoWeb" width="100%">
+</p>
+
 # MolmoWeb Setup On My Linux Machine
 
-This file captures the exact setup flow that worked in this repository on Linux with a conda environment named `molmoweb`.
+This document captures the Linux workflow that is working in this repository with a conda environment named `molmoweb`.
 
-## 1. Create And Use The Conda Environment
+<details open>
+<summary><strong>1. Create And Use The Conda Environment</strong></summary>
 
 ```bash
 conda create -n molmoweb python=3.10 -y
@@ -10,7 +15,10 @@ conda activate molmoweb
 conda install -c conda-forge uv -y
 ```
 
-## 2. Keep uv And Playwright Inside The Conda Environment
+</details>
+
+<details>
+<summary><strong>2. Keep uv And Playwright Inside The Conda Environment</strong></summary>
 
 ```bash
 export UV_PROJECT_ENVIRONMENT="$CONDA_PREFIX"
@@ -28,13 +36,19 @@ conda deactivate
 conda activate molmoweb
 ```
 
-## 3. Install The Python Dependencies
+</details>
+
+<details>
+<summary><strong>3. Install The Python Dependencies</strong></summary>
 
 ```bash
 uv sync
 ```
 
-## 4. Install Playwright Browsers
+</details>
+
+<details>
+<summary><strong>4. Install Playwright Browsers</strong></summary>
 
 ```bash
 uv run playwright install
@@ -42,14 +56,17 @@ uv run playwright install --with-deps chromium
 ```
 
 On Ubuntu 24.04, Playwright may still request `libasound2`, while the package you actually need is `libasound2t64`.
-If `playwright install --with-deps chromium` fails with that package name mismatch, run:
+If `playwright install --with-deps chromium` fails with that package mismatch, run:
 
 ```bash
 sudo apt-get install -y libasound2t64
 uv run playwright install --with-deps chromium
 ```
 
-## 5. Download The Model Weights
+</details>
+
+<details>
+<summary><strong>5. Download The Model Weights</strong></summary>
 
 Default 8B HF-compatible checkpoint:
 
@@ -57,28 +74,25 @@ Default 8B HF-compatible checkpoint:
 bash scripts/download_weights.sh
 ```
 
-The downloaded checkpoint will land under:
+The downloaded checkpoint lands under:
 
 ```bash
 ./checkpoints/MolmoWeb-8B
 ```
 
-To monitor the download size yourself:
+Useful monitoring commands:
 
 ```bash
 watch -n 5 'du -sh /home/prerak@medis.local/code/_tmp/molmoweb/checkpoints/MolmoWeb-8B'
-```
-
-To monitor how many model shards have arrived:
-
-```bash
 watch -n 5 'find /home/prerak@medis.local/code/_tmp/molmoweb/checkpoints/MolmoWeb-8B -maxdepth 1 -name "model-*.safetensors" | wc -l'
 ```
 
-## 6. Start The Model Server
+</details>
 
-This repository now includes a helper script that starts the server in the background,
-writes logs to a file, and prints the exact `tail -f` command to monitor it:
+<details open>
+<summary><strong>6. Start The Model Server</strong></summary>
+
+Start the background server with the Linux helper script:
 
 ```bash
 bash scripts/start_server_mylinux.sh
@@ -95,35 +109,32 @@ Status URL: http://127.0.0.1:8001/status
 Tail logs: tail -f /path/to/repo/logs/molmoweb_server_port_8001.log
 ```
 
-Equivalent explicit command:
-
-```bash
-nohup conda run --live-stream -n molmoweb bash -lc 'export UV_PROJECT_ENVIRONMENT="$CONDA_PREFIX"; export UV_CACHE_DIR="$CONDA_PREFIX/.uv-cache"; export PLAYWRIGHT_BROWSERS_PATH="$CONDA_PREFIX/.playwright"; export MOLMOWEB_LOG_FILE="/absolute/path/to/logfile.log"; export PORT=8001; export PREDICTOR_TYPE=hf; bash scripts/start_server.sh ./checkpoints/MolmoWeb-8B 8001' >/absolute/path/to/logfile.log 2>&1 &
-```
-
-If you want a custom port:
+Custom port:
 
 ```bash
 bash scripts/start_server_mylinux.sh ./checkpoints/MolmoWeb-8B 8002
 ```
 
-If you want a custom log file:
+Custom log file:
 
 ```bash
 bash scripts/start_server_mylinux.sh ./checkpoints/MolmoWeb-8B 8001 ./logs/custom_molmo.log
 ```
 
-To stop the background server cleanly:
+Stop the background server cleanly:
 
 ```bash
 bash scripts/stop_server_mylinux.sh
 ```
 
-The stop script now terminates the full process tree, not just the wrapper PID, so stale `uvicorn` workers do not remain bound to the port.
+The stop script terminates the full process tree, not just the wrapper PID, so stale `uvicorn` workers do not remain bound to the port.
 
-## 7. Start The WebUI
+</details>
 
-The separate WebUI runs on port `8010` by default and talks to the model server on port `8001`.
+<details open>
+<summary><strong>7. Start The WebUI</strong></summary>
+
+The WebUI runs on port `8010` by default and talks to the model server on port `8001`.
 
 ```bash
 bash scripts/start_webui_mylinux.sh 8010
@@ -140,7 +151,7 @@ URL: http://127.0.0.1:8010
 Tail logs: tail -f /path/to/repo/logs/molmoweb_webui_port_8010.log
 ```
 
-To stop the WebUI cleanly:
+Stop the WebUI cleanly:
 
 ```bash
 bash scripts/stop_webui_mylinux.sh 8010
@@ -148,33 +159,50 @@ bash scripts/stop_webui_mylinux.sh 8010
 
 The stop script also terminates the full process tree for the WebUI.
 
-## 8. Check That The Services Are Live
+</details>
 
-The FastAPI server exposes a health endpoint:
+<details open>
+<summary><strong>8. Restart Both Services</strong></summary>
+
+Use the helper wrapper to stop and restart the model server and WebUI together:
+
+```bash
+bash scripts/restart_services.sh
+```
+
+Explicit checkpoint and ports:
+
+```bash
+bash scripts/restart_services.sh ./checkpoints/MolmoWeb-8B 8001 8010
+```
+
+The wrapper waits for both status endpoints before returning success.
+
+</details>
+
+<details>
+<summary><strong>9. Check That The Services Are Live</strong></summary>
+
+Model server health:
 
 ```bash
 curl http://127.0.0.1:8001/status
-```
-
-If you open that URL in a browser, it renders an HTML status dashboard. For JSON explicitly:
-
-```bash
 curl http://127.0.0.1:8001/status?format=json
 ```
 
-The WebUI status endpoint is:
+WebUI health:
 
 ```bash
 curl http://127.0.0.1:8010/api/status
 ```
 
-The WebUI itself is:
+Open the UI at:
 
 ```text
 http://127.0.0.1:8010/
 ```
 
-Expected shape:
+Expected JSON shape:
 
 ```json
 {
@@ -188,40 +216,45 @@ Expected shape:
   "num_predictors": 1,
   "predictor_queue_size": 1,
   "cuda_device_count": 2,
-  "gpu_status": [
-    {
-      "device_index": 0,
-      "device_name": "...",
-      "memory_total_mb": 97887.0,
-      "memory_free_mb": 90000.0,
-      "memory_used_mb": 7887.0,
-      "memory_allocated_mb": 0.0,
-      "memory_reserved_mb": 0.0
-    }
-  ],
   "model_load_seconds": 12.345,
   "uptime_seconds": 34.567
 }
 ```
 
-To monitor the logs directly:
+</details>
+
+<details>
+<summary><strong>10. Follow Logs Reliably</strong></summary>
+
+Use `tail -F` instead of `tail -f` during restarts.
 
 ```bash
-tail -f /home/prerak@medis.local/code/_tmp/molmoweb/logs/molmoweb_server_port_8001.log
-tail -f /home/prerak@medis.local/code/_tmp/molmoweb/logs/molmoweb_webui_port_8010.log
+tail -F /home/prerak@medis.local/code/_tmp/molmoweb/logs/molmoweb_server_port_8001.log
+tail -F /home/prerak@medis.local/code/_tmp/molmoweb/logs/molmoweb_webui_port_8010.log
 ```
 
-## 9. WebUI Session Behavior
+Why:
+
+- `tail -F` keeps following the filename even if the log file is replaced or reopened across restarts.
+- `tail -f` only follows the current file handle, which is more fragile during service restarts.
+- Startup output can be quiet until actual requests arrive, so an apparently idle WebUI log is not necessarily a failure.
+
+</details>
+
+<details>
+<summary><strong>11. WebUI Session Behavior</strong></summary>
 
 - The first prompt in the WebUI auto-creates a new browser session.
 - Follow-up prompts reuse the same live browser session.
 - Session artifacts are stored in `logs/webui_sessions/`.
-- If the browser window is closed, the session is automatically marked as no longer live.
+- If the browser window is closed manually, the session is marked as no longer live.
+- The session console includes a built-in Hazlnut FAQ sample prompt.
 
 Useful WebUI API endpoints:
 
 ```text
 GET  /api/status
+GET  /api/config
 GET  /api/sessions
 POST /api/sessions
 GET  /api/sessions/{session_id}
@@ -231,7 +264,10 @@ GET  /api/model-service/status
 GET  /api/model-service/logs
 ```
 
-## 10. Workflow Diagram
+</details>
+
+<details>
+<summary><strong>12. Workflow Diagram</strong></summary>
 
 ```mermaid
 flowchart LR
@@ -247,19 +283,25 @@ flowchart LR
   A --> U
 ```
 
-## 11. Run The Smoke Test
+</details>
+
+<details>
+<summary><strong>13. Run The Smoke Test</strong></summary>
 
 ```bash
 conda run --live-stream -n molmoweb bash -lc 'export UV_PROJECT_ENVIRONMENT="$CONDA_PREFIX"; export UV_CACHE_DIR="$CONDA_PREFIX/.uv-cache"; export PLAYWRIGHT_BROWSERS_PATH="$CONDA_PREFIX/.playwright"; uv run python scripts/test_server.py'
 ```
 
-The successful response observed here was:
+A successful response observed in this environment was:
 
 ```text
 Lead Software Engineer, AI Infrastructure; Research Engineer, FlexOlmO; Senior Research Engineer, Olmo; Communications Manager
 ```
 
-## 12. Local Workflow Does Not Require Browserbase Or OpenAI Keys
+</details>
+
+<details>
+<summary><strong>14. Local Workflow Does Not Require Browserbase Or OpenAI Keys</strong></summary>
 
 The default local path used here does not require:
 
@@ -269,4 +311,6 @@ export BROWSERBASE_PROJECT_ID=...
 export OPENAI_API_KEY=...
 ```
 
-Those are only needed for optional Browserbase or GPT-based agent paths, not for the local HF server plus local client flow above.
+Those are only needed for optional Browserbase or GPT-based agent paths, not for the local HF server plus local browser workflow above.
+
+</details>

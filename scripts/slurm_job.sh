@@ -1,13 +1,13 @@
 #!/bin/bash
-#SBATCH --job-name=m0lmoweb
+#SBATCH --job-name=molmoweb
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=60000
 #SBATCH --time=3-00:00:00
 #SBATCH --nodelist=ar-asus2gpu
 #SBATCH --gres=gpu:1
-#SBATCH --output=/shared_upload/model_comparison_ct_tree_v2/DL_Exps/2026_02_19_AR5093_ct_tree_refinement/_logs/%j_CTRefine.log
-#SBATCH --error=/shared_upload/model_comparison_ct_tree_v2/DL_Exps/2026_02_19_AR5093_ct_tree_refinement/_logs/%j_CTRefine.err
+#SBATCH --output=/home/prerak@medis.local/code/_tmp/molmoweb/logs/slurm/%j_molmoweb.log
+#SBATCH --error=/home/prerak@medis.local/code/_tmp/molmoweb/logs/slurm/%j_molmoweb.err
 
 echo "----------------------------------- slurm setting --------------------------------------"
 echo
@@ -23,7 +23,7 @@ echo "
 
 echo '============================ SLURM JOB STARTED =========================='
 
-python "/home/prerak@medis.local/code/_tmp/slurm-job.py"
+python "/home/prerak@medis.local/code/_tmp/molmoweb/scripts/slurm_job.py"
 
 echo '============================ SLURM JOB FINISHED =========================='
 

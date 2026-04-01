@@ -16,6 +16,7 @@ from typing import Any
 import requests
 from PIL import Image
 
+import config
 from agent.actions import SendMsgToUser
 from inference import MolmoWeb
 from inference.web_episode import Trajectory, save_trajectory_screenshots_png
@@ -58,7 +59,7 @@ def _fallback_session_title(prompt: str) -> str:
     # Step 2: Truncate the fallback title to a short operator-friendly phrase.
     words = normalized.split(" ")
     fallback_title = " ".join(words[:6]).strip()
-    return fallback_title or "Untitled Session"
+    return fallback_title or config.SESSION_UNTITLED_TITLE
 
 
 def _sanitize_title(raw_title: str, prompt: str) -> str:
@@ -118,7 +119,7 @@ class SessionManager:
                 continue
             session_id = metadata.get("session_id") or session_file.parent.name
             metadata["session_id"] = session_id
-            metadata.setdefault("title", "Untitled Session")
+            metadata.setdefault("title", config.SESSION_UNTITLED_TITLE)
             metadata.setdefault("title_pending", False)
             metadata.setdefault("title_source", "archive")
             metadata.setdefault("run_state", "idle")
@@ -127,11 +128,13 @@ class SessionManager:
             metadata.setdefault("current_prompt", "")
             metadata.setdefault("last_error", "")
             metadata.setdefault("completion_status", "")
+            metadata.setdefault("live_turn", None)
             if metadata.get("live", False):
                 metadata["closed_at"] = metadata.get("closed_at") or metadata.get("updated_at", "")
                 if metadata.get("run_state") == "running":
                     metadata["run_state"] = "closed"
             metadata["live"] = False
+            metadata["live_turn"] = None
             _write_json_file(session_file, metadata)
             self._sessions[session_id] = SessionRuntime(
                 session_id=session_id,
@@ -146,7 +149,7 @@ class SessionManager:
     def _artifact_url(self, file_path: Path) -> str:
         # Step 1: Convert a filesystem path inside the artifact root into a browser URL.
         relative_path = file_path.relative_to(self.sessions_root)
-        return f"/webui-artifacts/{relative_path.as_posix()}"
+        return f"{config.WEBUI_ARTIFACT_MOUNT_PATH}/{relative_path.as_posix()}"
 
     def _session_json_path(self, runtime: SessionRuntime) -> Path:
         # Step 1: Resolve the canonical metadata file for a session.
@@ -186,6 +189,7 @@ class SessionManager:
             runtime.metadata["live"] = False
             runtime.metadata["run_state"] = run_state
             runtime.metadata["current_prompt"] = ""
+            runtime.metadata["live_turn"] = None
             runtime.metadata["updated_at"] = closed_at
             runtime.metadata["closed_at"] = closed_at
             if reason:
@@ -314,6 +318,7 @@ class SessionManager:
             runtime.metadata["current_step_index"] = len(trajectory.steps)
             runtime.metadata["latest_snapshot_url"] = self._artifact_url(snapshot_paths[-1]) if snapshot_paths else ""
             runtime.metadata["completion_status"] = "running"
+            runtime.metadata["live_turn"] = partial_turn
             self._write_session_metadata(runtime)
 
     def _build_step_summaries(self, session_id: str, turn_index: int, trajectory: Trajectory) -> list[dict[str, Any]]:
@@ -379,6 +384,7 @@ class SessionManager:
             "completion_status": "",
             "last_error": "",
             "latest_snapshot_url": "",
+            "live_turn": None,
             "session_dir": str(session_dir),
             "chat_transcript_path": str(session_dir / "chat_transcript.txt"),
             "event_log_path": str(session_dir / "events.jsonl"),
@@ -391,12 +397,7 @@ class SessionManager:
             return _fallback_session_title(prompt), "fallback"
 
         # Step 2: Ask the model service for a concise session title using the final screenshot.
-        title_prompt = (
-            "Generate a concise neutral task label of 3 to 6 words for this browser session. "
-            "Do not answer the task. Do not infer an outcome that is not explicitly shown. "
-            f"Original task: {prompt} "
-            "Return plain text only."
-        )
+        title_prompt = config.SESSION_TITLE_PROMPT_TEMPLATE.format(prompt=prompt)
         payload = {
             "prompt": title_prompt,
             "image_base64": _image_to_base64(final_step.state.img),
@@ -413,7 +414,11 @@ class SessionManager:
         }
 
         try:
-            response = requests.post(f"{runtime.metadata['endpoint'].rstrip('/')}/predict", json=payload, timeout=120)
+            response = requests.post(
+                f"{runtime.metadata['endpoint'].rstrip('/')}{config.MODEL_SERVICE_PREDICT_PATH}",
+                json=payload,
+                timeout=config.TITLE_GENERATION_TIMEOUT_SECONDS,
+            )
             response.raise_for_status()
             raw_title = response.json()
             if not isinstance(raw_title, str):
@@ -435,12 +440,19 @@ class SessionManager:
 
         # Step 3: Check the underlying Playwright browser and page handles on the owning thread.
         try:
-            if env.browser is None or env.page is None:
+            if env.browser is None:
                 return False
             if hasattr(env.browser, "is_connected") and not env.browser.is_connected():
                 return False
-            if env.page.is_closed():
-                return False
+
+            open_pages = []
+            if env.context is not None:
+                open_pages = [page for page in env.context.pages if not page.is_closed()]
+
+            if env.page is None or env.page.is_closed():
+                if not open_pages:
+                    return False
+                env.page = open_pages[0]
         except Exception:
             return False
 
@@ -457,7 +469,7 @@ class SessionManager:
                 headless=bool(runtime.metadata["headless"]),
                 verbose=False,
                 session_id=runtime.session_id,
-                session_title=runtime.metadata.get("title", "Untitled Session"),
+                session_title=runtime.metadata.get("title", config.SESSION_UNTITLED_TITLE),
             )
         except Exception as exc:
             runtime.startup_error = str(exc)
@@ -511,18 +523,7 @@ class SessionManager:
             self._mark_runtime_inactive(runtime, run_state="closed", reason="Browser worker stopped")
             return False
 
-        # Step 4: Ask the worker thread whether the Playwright browser is still open.
-        try:
-            is_live = bool(self._submit_task(runtime, "is_live", {}, timeout_seconds=2.0))
-        except Exception as exc:
-            self._mark_runtime_inactive(runtime, run_state="closed", reason=f"Worker liveness check failed: {exc}")
-            is_live = False
-
-        # Step 5: Persist the archived state when the browser has been closed externally.
-        if not is_live:
-            self._mark_runtime_inactive(runtime, run_state="closed", reason="Browser window closed")
-            return False
-
+        # Step 4: Keep the session live while its dedicated worker thread is still running.
         return True
 
     def _start_runtime_worker(self, runtime: SessionRuntime) -> None:
@@ -537,7 +538,7 @@ class SessionManager:
         runtime.worker_thread.start()
 
         # Step 2: Block until the session worker finishes initialization.
-        runtime.ready_event.wait(timeout=60)
+        runtime.ready_event.wait(timeout=config.SESSION_WORKER_READY_TIMEOUT_SECONDS)
         if runtime.startup_error:
             raise RuntimeError(runtime.startup_error)
         if runtime.client is None:
@@ -575,7 +576,7 @@ class SessionManager:
         # Step 1: Generate a stable session identifier and resolve the session defaults.
         session_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:8]
         title_pending = not (title and title.strip())
-        session_title = title.strip() if title and title.strip() else "Untitled Session"
+        session_title = title.strip() if title and title.strip() else config.SESSION_UNTITLED_TITLE
         session_endpoint = endpoint.strip() if endpoint and endpoint.strip() else self.default_endpoint
         session_dir = self._session_dir(session_id)
 
@@ -641,7 +642,7 @@ class SessionManager:
         # Step 2: Mark the session as actively running before browser execution begins.
         with runtime.lock:
             turn_index = int(runtime.metadata.get("turn_count", 0)) + 1
-            effective_max_steps = max_steps or int(runtime.metadata.get("max_steps_default", 15))
+            effective_max_steps = max_steps or int(runtime.metadata.get("max_steps_default", config.DEFAULT_MAX_STEPS))
             turn_started_at = _utc_now_iso()
             runtime.metadata["run_state"] = "running"
             runtime.metadata["current_turn_index"] = turn_index
@@ -649,6 +650,24 @@ class SessionManager:
             runtime.metadata["current_prompt"] = prompt
             runtime.metadata["last_error"] = ""
             runtime.metadata["updated_at"] = turn_started_at
+            runtime.metadata["live_turn"] = {
+                "turn_index": turn_index,
+                "prompt": prompt,
+                "assistant_text": "Run in progress...",
+                "completion_status": "running",
+                "started_at": turn_started_at,
+                "completed_at": "",
+                "max_steps": effective_max_steps,
+                "trajectory_html_url": "",
+                "trajectory_html_path": "",
+                "snapshot_urls": [],
+                "snapshot_paths": [],
+                "step_count": 0,
+                "steps": [],
+                "final_page_url": "",
+                "final_page_title": "",
+                "final_error": "",
+            }
             self._write_session_metadata(runtime)
             self._append_jsonl_line(
                 runtime.session_dir / "events.jsonl",
@@ -681,6 +700,7 @@ class SessionManager:
                 runtime.metadata["run_state"] = "error"
                 runtime.metadata["last_error"] = str(exc)
                 runtime.metadata["updated_at"] = failure_time
+                runtime.metadata["live_turn"] = None
                 self._write_session_metadata(runtime)
                 self._append_jsonl_line(
                     runtime.session_dir / "events.jsonl",
@@ -707,7 +727,7 @@ class SessionManager:
         turn_completed_at = _utc_now_iso()
 
         # Step 6: Ask the model service to title the session after the first completed turn when needed.
-        generated_title = runtime.metadata.get("title", "Untitled Session")
+        generated_title = runtime.metadata.get("title", config.SESSION_UNTITLED_TITLE)
         generated_title_source = runtime.metadata.get("title_source", "user")
         if turn_index == 1 and runtime.metadata.get("title_pending", False):
             generated_title, generated_title_source = self._generate_session_title(runtime, prompt, trajectory, turn_index)
@@ -769,6 +789,7 @@ class SessionManager:
             runtime.metadata["latest_snapshot_url"] = (
                 self._artifact_url(runtime.session_dir / "latest.png") if latest_snapshot_path is not None else ""
             )
+            runtime.metadata["live_turn"] = None
             runtime.metadata["live"] = True
             self._write_session_metadata(runtime)
 

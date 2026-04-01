@@ -15,6 +15,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
+import config
 from agent.model_backends import HFActionPredictor, NativeActionPredictor
 from utils.vis_utils.image import base64_to_numpy_image
 
@@ -24,7 +25,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SERVER_PID = os.getpid()
 SERVER_HOSTNAME = socket.gethostname()
 SERVER_LOG_FILE = os.environ.get("MOLMOWEB_LOG_FILE", "")
-SERVER_PORT = int(os.environ.get("PORT", "8001"))
+SERVER_PORT = int(os.environ.get("PORT", str(config.MODEL_SERVER_PORT)))
 
 CKPT = os.environ.get("CKPT")
 if CKPT is None:
@@ -35,7 +36,7 @@ PREDICTOR_TYPE = os.environ.get("PREDICTOR_TYPE", "native")
 
 TEMPERATURE = float(os.environ.get("TEMPERATURE", "0.7"))
 TOP_P = float(os.environ.get("TOP_P", "0.8"))
-MAX_TRACKED_JOBS = int(os.environ.get("MAX_TRACKED_JOBS", "100"))
+MAX_TRACKED_JOBS = int(os.environ.get("MAX_TRACKED_JOBS", str(config.MAX_TRACKED_JOBS)))
 JOB_STATE_LOCK = threading.RLock()
 TRACKED_JOBS: dict[str, dict[str, Any]] = {}
 
@@ -204,15 +205,15 @@ def _render_status_html(status_payload: dict[str, Any]) -> str:
 
     # Step 2: Build the runtime summary cards at the top of the page.
     summary_cards = [
-        ("Status", status_payload.get("status", "unknown")),
-        ("PID", str(status_payload.get("pid", "N/A"))),
+        (config.MODEL_STATUS_PAGE["summaryLabels"]["status"], status_payload.get("status", "unknown")),
+        (config.MODEL_STATUS_PAGE["summaryLabels"]["pid"], str(status_payload.get("pid", "N/A"))),
         (
-            "Predictors",
+            config.MODEL_STATUS_PAGE["summaryLabels"]["predictors"],
             f"{status_payload.get('predictor_queue_size', 0)}/{status_payload.get('predictor_queue_capacity', 0)} queued",
         ),
-        ("Active Jobs", str(status_payload.get("active_job_count", 0))),
-        ("Load Time", f"{status_payload.get('model_load_seconds', 0)} s"),
-        ("Uptime", f"{status_payload.get('uptime_seconds', 0)} s"),
+        (config.MODEL_STATUS_PAGE["summaryLabels"]["activeJobs"], str(status_payload.get("active_job_count", 0))),
+        (config.MODEL_STATUS_PAGE["summaryLabels"]["loadTime"], f"{status_payload.get('model_load_seconds', 0)} s"),
+        (config.MODEL_STATUS_PAGE["summaryLabels"]["uptime"], f"{status_payload.get('uptime_seconds', 0)} s"),
     ]
     summary_html = "".join(
         f"<article class='metric-card'><span class='metric-label'>{escape(label)}</span><span class='metric-value'>{escape(value)}</span></article>"
@@ -233,7 +234,7 @@ def _render_status_html(status_payload: dict[str, Any]) -> str:
             )
         gpu_html = "".join(gpu_html_parts)
     else:
-        gpu_html = "<div class='empty-state'>No CUDA devices detected.</div>"
+        gpu_html = f"<div class='empty-state'>{escape(config.MODEL_STATUS_PAGE['emptyGpu'])}</div>"
 
     # Step 4: Render only active jobs so the page stays focused on live work.
     if active_jobs:
@@ -250,16 +251,16 @@ def _render_status_html(status_payload: dict[str, Any]) -> str:
             for job in active_jobs
         )
     else:
-        active_job_html = "<div class='empty-state'>No active jobs.</div>"
+        active_job_html = f"<div class='empty-state'>{escape(config.MODEL_STATUS_PAGE['emptyJobs'])}</div>"
 
     # Step 5: Render the remaining process metadata below the live job section.
     detail_entries = [
-        ("Project Path", status_payload.get("project_path", "")),
-        ("Log File", status_payload.get("log_file", "")),
-        ("Checkpoint", status_payload.get("checkpoint", "")),
-        ("Predictor Type", status_payload.get("predictor_type", "")),
-        ("Python", status_payload.get("python_executable", "")),
-        ("Conda Prefix", status_payload.get("conda_prefix", "")),
+        (config.MODEL_STATUS_PAGE["detailLabels"]["projectPath"], status_payload.get("project_path", "")),
+        (config.MODEL_STATUS_PAGE["detailLabels"]["logFile"], status_payload.get("log_file", "")),
+        (config.MODEL_STATUS_PAGE["detailLabels"]["checkpoint"], status_payload.get("checkpoint", "")),
+        (config.MODEL_STATUS_PAGE["detailLabels"]["predictorType"], status_payload.get("predictor_type", "")),
+        (config.MODEL_STATUS_PAGE["detailLabels"]["python"], status_payload.get("python_executable", "")),
+        (config.MODEL_STATUS_PAGE["detailLabels"]["condaPrefix"], status_payload.get("conda_prefix", "")),
     ]
     details_html = "".join(
         (
@@ -278,8 +279,8 @@ def _render_status_html(status_payload: dict[str, Any]) -> str:
   <head>
     <meta charset='utf-8' />
     <meta name='viewport' content='width=device-width, initial-scale=1' />
-    <meta http-equiv='refresh' content='5' />
-    <title>MolmoWeb Model Service Status</title>
+    <meta http-equiv='refresh' content='{config.MODEL_STATUS_REFRESH_SECONDS}' />
+    <title>{escape(config.MODEL_STATUS_PAGE['title'])}</title>
     <style>
       :root {{
         --bg: #06101c;
@@ -328,21 +329,21 @@ def _render_status_html(status_payload: dict[str, Any]) -> str:
   <body>
     <main class='page'>
       <section class='panel header'>
-        <div class='muted'>Model Service</div>
-        <h1>MolmoWeb Runtime Status</h1>
-        <p class='muted'>Active jobs only, auto-refresh every 5 seconds.</p>
+        <div class='muted'>{escape(config.MODEL_STATUS_PAGE['headerEyebrow'])}</div>
+        <h1>{escape(config.MODEL_STATUS_PAGE['headerTitle'])}</h1>
+        <p class='muted'>{escape(config.MODEL_STATUS_PAGE['headerSubtitle'])}</p>
       </section>
       <section class='metrics'>{summary_html}</section>
       <section class='panel'>
-        <h2>GPU Memory</h2>
+        <h2>{escape(config.MODEL_STATUS_PAGE['gpuHeading'])}</h2>
         <div class='gpu-grid'>{gpu_html}</div>
       </section>
       <section class='panel'>
-        <h2>Active Jobs</h2>
+        <h2>{escape(config.MODEL_STATUS_PAGE['jobsHeading'])}</h2>
         <div class='job-grid'>{active_job_html}</div>
       </section>
       <section class='panel'>
-        <h2>Process Details</h2>
+        <h2>{escape(config.MODEL_STATUS_PAGE['detailsHeading'])}</h2>
         <div class='detail-grid'>{details_html}</div>
       </section>
     </main>
@@ -351,7 +352,7 @@ def _render_status_html(status_payload: dict[str, Any]) -> str:
 """
 
 
-@app.get("/status")
+@app.get(config.MODEL_SERVICE_STATUS_PATH)
 def status(request: Request, format: str | None = None):
     # Step 1: Compute live uptime and queue depth metrics.
     now = time.time()
@@ -404,7 +405,7 @@ class PredictRequest(BaseModel):
     request_context: dict[str, Any] | None = None
 
 
-@app.post("/predict")
+@app.post(config.MODEL_SERVICE_PREDICT_PATH)
 def predict(request: PredictRequest):
     global predictor_pool
 
@@ -415,7 +416,7 @@ def predict(request: PredictRequest):
 
     # Step 2: Acquire a predictor from the shared pool.
     try:
-        predictor = predictor_pool.get(timeout=30)
+        predictor = predictor_pool.get(timeout=config.PREDICTOR_ACQUIRE_TIMEOUT_SECONDS)
     except queue.Empty:
         _update_job_state(request.request_context, state="queue_timeout", started_at_epoch=request_started_at, error="All predictors are busy")
         return "Predictor error: All predictors are busy"
