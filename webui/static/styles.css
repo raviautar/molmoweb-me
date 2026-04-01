@@ -394,6 +394,7 @@ summary {
   gap: 20px;
   flex: 1;
   min-height: 0;
+  align-items: stretch;
 }
 
 .chat-panel,
@@ -401,6 +402,7 @@ summary {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  max-height: calc(100vh - 176px);
 }
 
 .chat-log,
@@ -414,11 +416,42 @@ summary {
 
 .chat-log {
   display: grid;
+  flex: 1;
   gap: 12px;
   padding: 14px;
-  min-height: 360px;
-  overflow: auto;
+  min-height: 0;
+  max-height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
   align-content: start;
+  scrollbar-gutter: stable;
+}
+
+.chat-log::-webkit-scrollbar,
+.snapshot-grid::-webkit-scrollbar,
+.log-view::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+.chat-log::-webkit-scrollbar-track,
+.snapshot-grid::-webkit-scrollbar-track,
+.log-view::-webkit-scrollbar-track {
+  background: rgba(7, 15, 27, 0.48);
+  border-radius: 999px;
+}
+
+.chat-log::-webkit-scrollbar-thumb,
+.snapshot-grid::-webkit-scrollbar-thumb,
+.log-view::-webkit-scrollbar-thumb {
+  background: rgba(143, 188, 255, 0.28);
+  border-radius: 999px;
+}
+
+.chat-log::-webkit-scrollbar-thumb:hover,
+.snapshot-grid::-webkit-scrollbar-thumb:hover,
+.log-view::-webkit-scrollbar-thumb:hover {
+  background: rgba(143, 188, 255, 0.42);
 }
 
 .chat-row {
@@ -591,6 +624,7 @@ summary {
   margin-top: 16px;
   padding-top: 16px;
   border-top: 1px solid rgba(143, 188, 255, 0.12);
+  flex-shrink: 0;
 }
 
 .sample-prompt-row,

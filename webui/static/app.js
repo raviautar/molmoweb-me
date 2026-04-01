@@ -863,16 +863,22 @@ function renderInspector(session) {
     elements.snapshotGrid.className = "snapshot-grid empty-state";
     elements.snapshotGrid.textContent = getEmptyStates().noSnapshots;
   } else {
-    state.galleryUrls = turn.snapshot_urls.slice();
+    const snapshotEntries = turn.snapshot_urls
+      .map((url, index) => ({
+        url,
+        stepNumber: index + 1,
+      }))
+      .reverse();
+    state.galleryUrls = snapshotEntries.map((entry) => entry.url);
     elements.snapshotGrid.className = "snapshot-grid";
-    elements.snapshotGrid.innerHTML = turn.snapshot_urls
+    elements.snapshotGrid.innerHTML = snapshotEntries
       .map(
-        (url, index) => `
+        (entry, index) => `
           <figure class="snapshot-card">
             <button class="snapshot-button" type="button" data-gallery-index="${index}">
-              <img src="${url}" alt="Turn ${turn.turn_index} step ${index + 1}" />
+              <img src="${entry.url}" alt="Turn ${turn.turn_index} step ${entry.stepNumber}" />
             </button>
-            <figcaption class="session-card-meta">Step ${index + 1}</figcaption>
+            <figcaption class="session-card-meta">Step ${entry.stepNumber}</figcaption>
           </figure>
         `,
       )
