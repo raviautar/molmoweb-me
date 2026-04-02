@@ -212,13 +212,36 @@ class MolmoWeb:
         except Exception as e:
             return None, Step(state=state, prediction=None, error=str(e))
 
+        # Step 1: Capture per-inference timing metadata when the model server returns it.
+        model_timing = action.get("model_timing") if isinstance(action, dict) else {}
+        inference_seconds = model_timing.get("inference_seconds") if isinstance(model_timing, dict) else None
+        total_runtime_seconds = model_timing.get("total_inference_seconds") if isinstance(model_timing, dict) else None
+        total_inference_count = model_timing.get("total_inference_count") if isinstance(model_timing, dict) else None
+        inference_seconds = float(inference_seconds) if isinstance(inference_seconds, (int, float)) else None
+        total_runtime_seconds = float(total_runtime_seconds) if isinstance(total_runtime_seconds, (int, float)) else None
+        total_inference_count = int(total_inference_count) if isinstance(total_inference_count, (int, float)) else None
+
         try:
             next_obs = self._step_env(action)
             self.last_obs = next_obs
         except Exception as e:
-            return None, Step(state=state, prediction=prediction, error=str(e))
+            return None, Step(
+                state=state,
+                prediction=prediction,
+                error=str(e),
+                model_inference_seconds=inference_seconds,
+                model_total_runtime_seconds=total_runtime_seconds,
+                model_total_inference_count=total_inference_count,
+            )
 
-        return next_obs, Step(state=state, prediction=prediction, error=None)
+        return next_obs, Step(
+            state=state,
+            prediction=prediction,
+            error=None,
+            model_inference_seconds=inference_seconds,
+            model_total_runtime_seconds=total_runtime_seconds,
+            model_total_inference_count=total_inference_count,
+        )
 
     def _run_iters(
         self,

@@ -11,7 +11,7 @@ os.environ.setdefault("MOLMO_DATA_DIR", os.path.join(os.environ.get("TMPDIR", "/
 
 import queue
 import torch
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
@@ -39,6 +39,9 @@ TOP_P = float(os.environ.get("TOP_P", "0.8"))
 MAX_TRACKED_JOBS = int(os.environ.get("MAX_TRACKED_JOBS", str(config.MAX_TRACKED_JOBS)))
 JOB_STATE_LOCK = threading.RLock()
 TRACKED_JOBS: dict[str, dict[str, Any]] = {}
+MODEL_TOTAL_INFERENCE_SECONDS = 0.0
+MODEL_TOTAL_INFERENCE_COUNT = 0
+MODEL_LAST_INFERENCE_SECONDS: float | None = None
 
 
 def _get_gpu_status() -> list[dict]:
@@ -97,6 +100,9 @@ def _update_job_state(
     state: str,
     started_at_epoch: float | None = None,
     error: str = "",
+    inference_seconds: float | None = None,
+    model_total_inference_seconds: float | None = None,
+    model_total_inference_count: int | None = None,
 ) -> str:
     # Step 1: Resolve the tracked job key for this request.
     job_key = _job_key_from_context(request_context)
@@ -124,6 +130,12 @@ def _update_job_state(
             job_record["started_at_epoch"] = started_at_epoch
         if error:
             job_record["last_error"] = error
+        if inference_seconds is not None:
+            job_record["inference_seconds"] = round(max(float(inference_seconds), 0.0), 6)
+        if model_total_inference_seconds is not None:
+            job_record["model_total_inference_seconds"] = round(max(float(model_total_inference_seconds), 0.0), 6)
+        if model_total_inference_count is not None:
+            job_record["model_total_inference_count"] = max(int(model_total_inference_count), 0)
         TRACKED_JOBS[job_key] = job_record
         _prune_tracked_jobs()
 
@@ -133,13 +145,31 @@ def _update_job_state(
 
 def _list_tracked_jobs() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     # Step 1: Snapshot the tracked jobs under the shared lock.
+    now = time.time()
     with JOB_STATE_LOCK:
         tracked_jobs = [dict(job_record) for job_record in TRACKED_JOBS.values()]
 
-    # Step 2: Sort jobs by most recent update and split active from historical entries.
+    # Step 2: Compute per-job elapsed runtime for active requests.
+    for job_record in tracked_jobs:
+        started_at = job_record.get("started_at_epoch")
+        if job_record.get("state") == "running" and isinstance(started_at, (int, float)):
+            job_record["running_elapsed_seconds"] = round(max(now - float(started_at), 0.0), 3)
+
+    # Step 3: Sort jobs by most recent update and split active from historical entries.
     tracked_jobs.sort(key=lambda job_record: job_record.get("last_updated_at_epoch", 0.0), reverse=True)
     active_jobs = [job_record for job_record in tracked_jobs if job_record.get("state") == "running"]
     return active_jobs, tracked_jobs
+
+
+def _record_model_inference_runtime(inference_seconds: float) -> tuple[float, int]:
+    # Step 1: Add the elapsed inference runtime to the model-wide totals.
+    global MODEL_TOTAL_INFERENCE_SECONDS, MODEL_TOTAL_INFERENCE_COUNT, MODEL_LAST_INFERENCE_SECONDS
+    elapsed = max(float(inference_seconds), 0.0)
+    with JOB_STATE_LOCK:
+        MODEL_TOTAL_INFERENCE_SECONDS += elapsed
+        MODEL_TOTAL_INFERENCE_COUNT += 1
+        MODEL_LAST_INFERENCE_SECONDS = elapsed
+        return MODEL_TOTAL_INFERENCE_SECONDS, MODEL_TOTAL_INFERENCE_COUNT
 
 
 def create_predictor_pool(
@@ -357,6 +387,15 @@ def status(request: Request, format: str | None = None):
     # Step 1: Compute live uptime and queue depth metrics.
     now = time.time()
     active_jobs, tracked_jobs = _list_tracked_jobs()
+    with JOB_STATE_LOCK:
+        model_total_inference_seconds = MODEL_TOTAL_INFERENCE_SECONDS
+        model_total_inference_count = MODEL_TOTAL_INFERENCE_COUNT
+        model_last_inference_seconds = MODEL_LAST_INFERENCE_SECONDS
+    model_average_inference_seconds = (
+        model_total_inference_seconds / model_total_inference_count
+        if model_total_inference_count > 0
+        else 0.0
+    )
 
     # Step 2: Report runtime, filesystem, and GPU information that helps monitor the process.
     status_payload = {
@@ -382,6 +421,14 @@ def status(request: Request, format: str | None = None):
         "model_ready_at_epoch": round(MODEL_READY_AT, 3),
         "model_load_seconds": round(MODEL_READY_AT - SERVER_IMPORT_STARTED_AT, 3),
         "uptime_seconds": round(now - MODEL_READY_AT, 3),
+        "last_inference_seconds": (
+            round(model_last_inference_seconds, 6)
+            if model_last_inference_seconds is not None
+            else None
+        ),
+        "model_total_inference_seconds": round(model_total_inference_seconds, 6),
+        "model_total_inference_count": int(model_total_inference_count),
+        "model_average_inference_seconds": round(model_average_inference_seconds, 6),
         "python_executable": os.sys.executable,
         "cwd": os.getcwd(),
         "conda_prefix": os.environ.get("CONDA_PREFIX", ""),
@@ -406,13 +453,14 @@ class PredictRequest(BaseModel):
 
 
 @app.post(config.MODEL_SERVICE_PREDICT_PATH)
-def predict(request: PredictRequest):
+def predict(request: PredictRequest, response: Response):
     global predictor_pool
 
     # Step 1: Decode the incoming image payload.
     image_np = base64_to_numpy_image(request.image_base64)
     request_started_at = time.time()
     job_key = _update_job_state(request.request_context, state="running", started_at_epoch=request_started_at)
+    response.headers["X-Molmo-Job-Key"] = job_key
 
     # Step 2: Acquire a predictor from the shared pool.
     try:
@@ -435,7 +483,20 @@ def predict(request: PredictRequest):
         try:
             result = predictor.predict(request.prompt, image_np, past_actions=request.past_actions)
         except Exception as e:
-            _update_job_state(request.request_context, state="error", started_at_epoch=request_started_at, error=str(e))
+            inference_seconds = max(time.time() - request_started_at, 0.0)
+            model_total_runtime, model_total_count = _record_model_inference_runtime(inference_seconds)
+            _update_job_state(
+                request.request_context,
+                state="error",
+                started_at_epoch=request_started_at,
+                error=str(e),
+                inference_seconds=inference_seconds,
+                model_total_inference_seconds=model_total_runtime,
+                model_total_inference_count=model_total_count,
+            )
+            response.headers["X-Molmo-Inference-Seconds"] = f"{inference_seconds:.6f}"
+            response.headers["X-Molmo-Total-Inference-Seconds"] = f"{model_total_runtime:.6f}"
+            response.headers["X-Molmo-Total-Inference-Count"] = str(model_total_count)
             return f"Predictor error: {str(e)}"
         finally:
             # Step 4: Restore predictor sampling parameters before returning it to the pool.
@@ -446,5 +507,17 @@ def predict(request: PredictRequest):
         # Step 5: Return the predictor to the pool even if inference fails.
         predictor_pool.put(predictor)
 
-    _update_job_state(request.request_context, state="idle", started_at_epoch=request_started_at)
+    inference_seconds = max(time.time() - request_started_at, 0.0)
+    model_total_runtime, model_total_count = _record_model_inference_runtime(inference_seconds)
+    _update_job_state(
+        request.request_context,
+        state="idle",
+        started_at_epoch=request_started_at,
+        inference_seconds=inference_seconds,
+        model_total_inference_seconds=model_total_runtime,
+        model_total_inference_count=model_total_count,
+    )
+    response.headers["X-Molmo-Inference-Seconds"] = f"{inference_seconds:.6f}"
+    response.headers["X-Molmo-Total-Inference-Seconds"] = f"{model_total_runtime:.6f}"
+    response.headers["X-Molmo-Total-Inference-Count"] = str(model_total_count)
     return result

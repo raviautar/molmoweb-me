@@ -73,6 +73,9 @@ class Step(BaseModel):
     state: State | None
     prediction: ActionOutput | None
     error: str | None
+    model_inference_seconds: float | None = None
+    model_total_runtime_seconds: float | None = None
+    model_total_inference_count: int | None = None
 
 
 class Trajectory(BaseModel):
@@ -81,5 +84,4 @@ class Trajectory(BaseModel):
     def save_html(self, output_path: str | None = None, query: str | None = None) -> str:
         from .trajectory_visualizer import save_trajectory_html
         return str(save_trajectory_html(self, output_path, query))
-
 

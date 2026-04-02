@@ -298,6 +298,17 @@ class SessionManager:
 
         # Step 3: Build the current live turn record that the UI can poll while the run is active.
         snapshot_paths = sorted(screenshots_dir.glob("step_*.png"))
+        step_summaries = self._build_step_summaries(runtime.session_id, turn_index, trajectory)
+        model_runtime_total_seconds = round(
+            sum(
+                float(step_summary.get("model_inference_seconds") or 0.0)
+                for step_summary in step_summaries
+            ),
+            6,
+        )
+        model_inference_count = sum(
+            1 for step_summary in step_summaries if step_summary.get("model_inference_seconds") is not None
+        )
         partial_turn = {
             "turn_index": turn_index,
             "prompt": prompt,
@@ -311,7 +322,9 @@ class SessionManager:
             "snapshot_urls": [self._artifact_url(path) for path in snapshot_paths],
             "snapshot_paths": [str(path) for path in snapshot_paths],
             "step_count": len(trajectory.steps),
-            "steps": self._build_step_summaries(runtime.session_id, turn_index, trajectory),
+            "steps": step_summaries,
+            "model_runtime_total_seconds": model_runtime_total_seconds,
+            "model_inference_count": model_inference_count,
             "final_page_url": latest_step.state.page_url if latest_step.state is not None else "",
             "final_page_title": latest_step.state.page_title if latest_step.state is not None else "",
             "final_error": latest_step.error or "",
@@ -348,6 +361,21 @@ class SessionManager:
                         else ""
                     ),
                     "error": step.error or "",
+                    "model_inference_seconds": (
+                        round(float(step.model_inference_seconds), 6)
+                        if step.model_inference_seconds is not None
+                        else None
+                    ),
+                    "model_total_runtime_seconds": (
+                        round(float(step.model_total_runtime_seconds), 6)
+                        if step.model_total_runtime_seconds is not None
+                        else None
+                    ),
+                    "model_total_inference_count": (
+                        int(step.model_total_inference_count)
+                        if step.model_total_inference_count is not None
+                        else None
+                    ),
                     "snapshot_url": self._artifact_url(screenshot_path) if screenshot_path.exists() else "",
                 }
             )
@@ -686,6 +714,8 @@ class SessionManager:
                 "snapshot_paths": [],
                 "step_count": 0,
                 "steps": [],
+                "model_runtime_total_seconds": 0.0,
+                "model_inference_count": 0,
                 "final_page_url": "",
                 "final_page_title": "",
                 "final_error": "",
@@ -755,6 +785,16 @@ class SessionManager:
         trajectory_html_path = Path(trajectory.save_html(output_path=str(turn_dir / "trajectory.html"), query=prompt))
         assistant_text, completion_status = self._extract_assistant_text(trajectory, effective_max_steps)
         step_summaries = self._build_step_summaries(runtime.session_id, turn_index, trajectory)
+        model_runtime_total_seconds = round(
+            sum(
+                float(step_summary.get("model_inference_seconds") or 0.0)
+                for step_summary in step_summaries
+            ),
+            6,
+        )
+        model_inference_count = sum(
+            1 for step_summary in step_summaries if step_summary.get("model_inference_seconds") is not None
+        )
         latest_snapshot_path = Path(screenshots[-1]) if screenshots else None
         if latest_snapshot_path is not None:
             shutil.copy2(latest_snapshot_path, runtime.session_dir / "latest.png")
@@ -783,6 +823,8 @@ class SessionManager:
             "snapshot_paths": screenshots,
             "step_count": len(trajectory.steps),
             "steps": step_summaries,
+            "model_runtime_total_seconds": model_runtime_total_seconds,
+            "model_inference_count": model_inference_count,
             "final_page_url": final_step.state.page_url if final_step and final_step.state is not None else "",
             "final_page_title": final_step.state.page_title if final_step and final_step.state is not None else "",
             "final_error": final_step.error if final_step is not None and final_step.error is not None else "",

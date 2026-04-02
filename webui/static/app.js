@@ -224,6 +224,52 @@ function formatDate(value) {
   return new Date(value).toLocaleString();
 }
 
+function toFiniteNumber(value) {
+  // Step 1: Parse numeric values from mixed payload types safely.
+  const numericValue = Number(value);
+  return Number.isFinite(numericValue) ? numericValue : null;
+}
+
+function formatSeconds(value, fractionDigits = 3) {
+  // Step 1: Render a stable seconds label for runtime debugging fields.
+  const numericValue = toFiniteNumber(value);
+  if (numericValue === null) {
+    return "N/A";
+  }
+  return `${numericValue.toFixed(fractionDigits)} s`;
+}
+
+function getTurnModelRuntimeSeconds(turn) {
+  // Step 1: Prefer the precomputed turn-level model runtime when available.
+  const turnRuntime = toFiniteNumber(turn && turn.model_runtime_total_seconds);
+  if (turnRuntime !== null) {
+    return turnRuntime;
+  }
+
+  // Step 2: Fall back to summing per-step inference runtimes for older persisted turns.
+  const steps = Array.isArray(turn && turn.steps) ? turn.steps : [];
+  const stepRuntimeTotal = steps.reduce((total, step) => {
+    const stepRuntime = toFiniteNumber(step && step.model_inference_seconds);
+    return total + (stepRuntime === null ? 0 : stepRuntime);
+  }, 0);
+  return stepRuntimeTotal > 0 ? stepRuntimeTotal : null;
+}
+
+function getTurnInferenceCount(turn) {
+  // Step 1: Prefer the precomputed turn-level inference count when available.
+  const turnCount = toFiniteNumber(turn && turn.model_inference_count);
+  if (turnCount !== null) {
+    return Math.max(0, Math.trunc(turnCount));
+  }
+
+  // Step 2: Count per-step inference records for older persisted turns.
+  const steps = Array.isArray(turn && turn.steps) ? turn.steps : [];
+  const count = steps.reduce((total, step) => {
+    return total + (toFiniteNumber(step && step.model_inference_seconds) === null ? 0 : 1);
+  }, 0);
+  return count > 0 ? count : null;
+}
+
 function showError(message) {
   // Step 1: Hide the error banner when there is nothing useful to show.
   if (!message) {
@@ -752,6 +798,20 @@ function renderStepThoughtMessages(turn, isSelectedTurn) {
       const actionText = step.action_text || "";
       const stepMessage = step.message || "";
       const stepError = step.error || "";
+      const stepInferenceSeconds = toFiniteNumber(step.model_inference_seconds);
+      const stepTotalRuntimeSeconds = toFiniteNumber(step.model_total_runtime_seconds);
+      const stepTotalInferenceCount = toFiniteNumber(step.model_total_inference_count);
+      const runtimeSegments = [];
+      if (stepInferenceSeconds !== null) {
+        runtimeSegments.push(`Inference runtime ${formatSeconds(stepInferenceSeconds)}`);
+      }
+      if (stepTotalRuntimeSeconds !== null) {
+        const callSuffix = stepTotalInferenceCount !== null ? ` (${Math.max(0, Math.trunc(stepTotalInferenceCount))} calls)` : "";
+        runtimeSegments.push(`Model total ${formatSeconds(stepTotalRuntimeSeconds)}${callSuffix}`);
+      }
+      const runtimeMeta = runtimeSegments.length > 0
+        ? `<div class="chat-step-meta mono">${escapeHtml(runtimeSegments.join(" • "))}</div>`
+        : "";
       const openAttribute = state.expandedThoughtKeys.has(thoughtKey) ? " open" : "";
       return `
         <div class="chat-row assistant-row thought-row" data-turn-index="${turn.turn_index}">
@@ -764,6 +824,7 @@ function renderStepThoughtMessages(turn, isSelectedTurn) {
               <div class="thought-body">
                 <div class="chat-step-meta">${escapeHtml(pageTitle)}</div>
                 <div class="chat-step-meta mono">${escapeHtml(pageUrl)}</div>
+                ${runtimeMeta}
                 ${renderLinkedTextBlock(thoughtText, "thought-paragraph")}
                 ${actionText ? renderLinkedTextBlock(actionText, "thought-detail mono") : ""}
                 ${stepMessage ? renderLinkedTextBlock(stepMessage, "thought-detail") : ""}
@@ -1002,8 +1063,13 @@ function renderInspector(session) {
 
   // Step 3: Render the inspector summary and artifact links.
   const completionSuffix = turn && turn.completion_status ? ` • ${turn.completion_status.replaceAll("_", " ")}` : "";
+  const turnModelRuntime = getTurnModelRuntimeSeconds(turn);
+  const turnInferenceCount = getTurnInferenceCount(turn);
+  const modelRuntimeSuffix = turnModelRuntime !== null
+    ? ` • model runtime ${formatSeconds(turnModelRuntime)}${turnInferenceCount !== null ? ` (${turnInferenceCount} calls)` : ""}`
+    : "";
   elements.artifactSummary.textContent = turn
-    ? `Turn ${turn.turn_index} • ${turn.step_count} steps${completionSuffix} • ${turn.final_page_title || "No final page title"}`
+    ? `Turn ${turn.turn_index} • ${turn.step_count} steps${completionSuffix}${modelRuntimeSuffix} • ${turn.final_page_title || "No final page title"}`
     : "No turns have been run for this session yet.";
   setArtifactLink(elements.trajectoryLink, turn ? turn.trajectory_html_url : "");
   setArtifactLink(
@@ -1059,6 +1125,10 @@ function renderModelService() {
   }
 
   const status = state.modelServiceStatus;
+  const totalInferenceCount = Math.max(0, Math.trunc(toFiniteNumber(status.model_total_inference_count) || 0));
+  const totalInferenceRuntime = toFiniteNumber(status.model_total_inference_seconds) || 0;
+  const averageInferenceRuntime = toFiniteNumber(status.model_average_inference_seconds);
+  const lastInferenceRuntime = toFiniteNumber(status.last_inference_seconds);
 
   // Step 2: Render key model-service metadata and the active job count.
   const metadataEntries = [
@@ -1068,6 +1138,9 @@ function renderModelService() {
     ["Predictor Type", status.predictor_type || "N/A"],
     ["Queue Size", `${status.predictor_queue_size}/${status.predictor_queue_capacity}`],
     ["Active Jobs", String(status.active_job_count || 0)],
+    ["Last Inference Runtime", formatSeconds(lastInferenceRuntime)],
+    ["Average Inference Runtime", formatSeconds(averageInferenceRuntime)],
+    ["Total Model Runtime", `${formatSeconds(totalInferenceRuntime)} (${totalInferenceCount} calls)`],
   ];
   const gpuEntries = Array.isArray(status.gpu_status)
     ? status.gpu_status.map((gpu) => {
@@ -1099,16 +1172,24 @@ function renderModelService() {
   } else {
     elements.activeJobLog.className = "step-log";
     elements.activeJobLog.innerHTML = jobsToRender
-      .map(
-        (job) => `
+      .map((job) => {
+        const inferenceRuntime = toFiniteNumber(job.inference_seconds);
+        const runningRuntime = toFiniteNumber(job.running_elapsed_seconds);
+        const runtimeLabel = inferenceRuntime !== null
+          ? `Inference runtime ${formatSeconds(inferenceRuntime)}`
+          : runningRuntime !== null
+            ? `Inference runtime ${formatSeconds(runningRuntime)} (running)`
+            : "Inference runtime pending";
+        return `
           <article class="step-card compact-step-card">
             <div class="chat-card-meta">${escapeHtml(job.state || "unknown")} • turn ${escapeHtml(String(job.turn_index || 0))} • step ${escapeHtml(String(job.step_index || 0))}/${escapeHtml(String(job.max_steps || 0))}</div>
+            <div class="chat-step-meta mono">${escapeHtml(runtimeLabel)}</div>
             <h4>${escapeHtml(job.session_title || job.session_id || job.job_key || "anonymous request")}</h4>
             <p>${escapeHtml(job.page_title || "")}</p>
             <pre>${escapeHtml(job.query || job.last_error || "")}</pre>
           </article>
-        `,
-      )
+        `;
+      })
       .join("");
   }
 
@@ -1245,6 +1326,8 @@ async function sendPrompt() {
         snapshot_paths: [],
         step_count: 0,
         steps: [],
+        model_runtime_total_seconds: 0,
+        model_inference_count: 0,
         final_page_url: "",
         final_page_title: "",
         final_error: "",

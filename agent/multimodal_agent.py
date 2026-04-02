@@ -249,6 +249,11 @@ class MultimodalAgent(AgentBase):
             past_actions=past_actions_dict,
             request_context=request_context,
         )
+        model_timing = {
+            "inference_seconds": getattr(self.predictor, "last_inference_seconds", None),
+            "total_inference_seconds": getattr(self.predictor, "last_total_inference_seconds", None),
+            "total_inference_count": getattr(self.predictor, "last_total_inference_count", None),
+        }
         # print(f"[{datetime.now().strftime('%H:%M:%S')}] Raw predicted text: {pred_text}")
 
         self.last_model_inputs = {
@@ -302,6 +307,7 @@ class MultimodalAgent(AgentBase):
             "action_str": action_output.to_str(),
             "action": action_json,
             "action_description": desc,
+            "model_timing": model_timing,
         }
         self.past_observations.append(obs)
         self.past_actions.append(

@@ -29,10 +29,38 @@ class FastApiActionPredictor:
         self.endpoint = endpoint
         self.temperature = temperature
         self.top_p = top_p
+        self.last_inference_seconds: float | None = None
+        self.last_total_inference_seconds: float | None = None
+        self.last_total_inference_count: int | None = None
+
+    @staticmethod
+    def _parse_float_header(value: str | None) -> float | None:
+        # Step 1: Parse optional floating-point response headers safely.
+        if value is None or value == "":
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _parse_int_header(value: str | None) -> int | None:
+        # Step 1: Parse optional integer response headers safely.
+        if value is None or value == "":
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
 
     def predict(self, prompt: str, image_np: np.ndarray, past_actions: list | None = None, **kwargs) -> str | None:
         from utils.vis_utils.image import image_to_base64
         try:
+            # Step 1: Clear stale timing fields before this request starts.
+            self.last_inference_seconds = None
+            self.last_total_inference_seconds = None
+            self.last_total_inference_count = None
+
             # Step 1: Build the base payload shared by all FastAPI prediction requests.
             payload = {"prompt": prompt, "image_base64": image_to_base64(image_np)}
             if past_actions is not None:
@@ -45,6 +73,9 @@ class FastApiActionPredictor:
 
             # Step 2: Send the prediction request to the model server.
             resp = requests.post(f"{self.endpoint}/predict", json=payload)
+            self.last_inference_seconds = self._parse_float_header(resp.headers.get("X-Molmo-Inference-Seconds"))
+            self.last_total_inference_seconds = self._parse_float_header(resp.headers.get("X-Molmo-Total-Inference-Seconds"))
+            self.last_total_inference_count = self._parse_int_header(resp.headers.get("X-Molmo-Total-Inference-Count"))
             if resp.status_code != 200:
                 print(f"[ERROR] FastAPI {self.endpoint} returned {resp.status_code}: {resp.text}")
                 return None
