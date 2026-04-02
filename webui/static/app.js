@@ -440,7 +440,11 @@ function applyFrontendConfig() {
   elements.serviceHealthTitle.textContent = labels.serviceHealth;
   elements.serviceHealthHint.textContent = labels.serviceHealthHint;
   elements.sessionEndpoint.placeholder = placeholders.endpoint;
-  elements.promptInput.placeholder = placeholders.prompt;
+  // Step 1: Embed the quick-sample hint directly into the textarea placeholder so no
+  // extra UI block is needed — the sample label + expected answer appear as a second
+  // line of greyed-out hint text when the field is empty.
+  const sampleHint = `\n— ${labels.samplePromptTitle}: ${sample.prompt.length > 100 ? sample.prompt.slice(0, 100) + "…" : sample.prompt}  (${labels.samplePromptExpectation}: ${sample.expectedAnswer})`;
+  elements.promptInput.placeholder = placeholders.prompt + sampleHint;
   elements.sessionChromeProfile.placeholder = placeholders.chromeProfile;
   elements.sessionChromeChannel.placeholder = placeholders.chromeChannel;
   elements.sessionChromeProfileName.placeholder = placeholders.chromeProfileName;
