@@ -156,7 +156,12 @@ def create_predictor_pool(
     print(f"GPUs: {torch.cuda.device_count()}, predictors: {num_predictors}, type: {predictor_type}")
 
     for i in range(num_predictors):
-        device = f"cuda:{i}"
+        if torch.cuda.is_available():
+            device = f"cuda:{i}"
+        elif torch.backends.mps.is_available():
+            device = "mps"
+        else:
+            device = "cpu"
 
         if predictor_type == "hf":
             predictor = HFActionPredictor(checkpoint=ckpt, device=device)

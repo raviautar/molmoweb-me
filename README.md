@@ -300,8 +300,55 @@ Lead Software Engineer, AI Infrastructure; Research Engineer, FlexOlmO; Senior R
 
 </details>
 
+<details open>
+<summary><strong>14. Quick Start With Tilt (macOS / Apple Silicon)</strong></summary>
+
+If you have [Tilt](https://tilt.dev/) installed, the entire stack (setup, model server, WebUI) can be started with a single command. This is the recommended path on macOS with Apple Silicon (no conda required).
+
+**Prerequisites:**
+
+- [uv](https://docs.astral.sh/uv/) installed
+- [Tilt](https://tilt.dev/) installed (`brew install tilt-dev/tap/tilt`)
+- Model weights downloaded (see step 5, use `allenai/MolmoWeb-4B` for 32 GB machines)
+
+**Start everything:**
+
+```bash
+tilt up
+```
+
+This runs three resources in order:
+
+1. **setup** -- `uv sync --frozen` and `playwright install chromium`
+2. **model-server** -- loads the checkpoint on MPS (Apple Silicon) or CUDA and serves on port `8001`
+3. **webui** -- starts the session console on port `8010` (waits for model-server to be ready)
+
+**Dashboard:** open the Tilt UI at `http://localhost:10350` to see logs and health status for each resource.
+
+**Ports:**
+
+| Service | URL |
+|---|---|
+| WebUI | http://127.0.0.1:8010 |
+| Model server status | http://127.0.0.1:8001/status |
+| Tilt dashboard | http://localhost:10350 |
+
+**Stop everything:**
+
+```bash
+tilt down
+```
+
+**Notes:**
+
+- On Apple Silicon with 32 GB RAM, use the 4B model (`allenai/MolmoWeb-4B`). The 8B model fits at float16 (~16 GB) but leaves less headroom.
+- The Tiltfile defaults to `checkpoints/MolmoWeb-4B`. To use a different checkpoint, edit `CHECKPOINT` in `Tiltfile` before `tilt up`.
+- The `setup` resource installs Playwright Chromium automatically. Without this step, browser sessions will fail with `BrowserType.launch: Executable doesn't exist`.
+
+</details>
+
 <details>
-<summary><strong>14. Local Workflow Does Not Require Browserbase Or OpenAI Keys</strong></summary>
+<summary><strong>15. Local Workflow Does Not Require Browserbase Or OpenAI Keys</strong></summary>
 
 The default local path used here does not require:
 
