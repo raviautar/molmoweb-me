@@ -133,16 +133,24 @@ class HFActionPredictor:
         import torch
         from transformers import AutoProcessor, AutoModelForImageTextToText
 
-        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+        if device is None:
+            if torch.cuda.is_available():
+                device = "cuda"
+            elif torch.backends.mps.is_available():
+                device = "mps"
+            else:
+                device = "cpu"
+        self.device = device
         self.max_new_tokens = max_new_tokens
         self.temperature = temperature
         self.top_p = top_p
 
         self.processor = AutoProcessor.from_pretrained(checkpoint, trust_remote_code=True, padding_side="left")
+        dtype = torch.float16 if self.device in ("mps", "cuda") else torch.float32
         self.model = AutoModelForImageTextToText.from_pretrained(
             checkpoint,
             trust_remote_code=True,
-            torch_dtype=torch.float32,
+            torch_dtype=dtype,
             attn_implementation="sdpa",
         ).to(self.device)
         self.model.eval()
